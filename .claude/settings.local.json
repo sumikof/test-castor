@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add *)",
+      "Bash(git commit -q -m 'Add TMS Web Service design document *)",
+      "Bash(git commit -q -m 'Address design review REV-01..07 *)",
+      "mcp__claude_ai_Context7__query-docs"
+    ]
+  }
+}
