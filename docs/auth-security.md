@@ -1,0 +1,230 @@
+# 認証・認可・セキュリティ
+
+TMS Web Service の認証・認可・テナント境界・流量制御の実装仕様。
+
+関連ドキュメント:
+- [データモデル](data-model.md) — User / Session / ApiToken エンティティ定義
+- [API リファレンス](api-reference.md) — エンドポイント一覧・共通仕様
+- [アーキテクチャ](architecture.md) — ポータビリティ境界の全体像
+
+---
+
+## 認証方式
+
+TMS は2つの独立した認証方式を持つ。それぞれの到達可能範囲は完全に分離される。
+
+| 方式 | 主体 | 用途 | スコープ |
+|---|---|---|---|
+| セッション Cookie | UI ユーザー | ブラウザ操作 | Organization（role 付き） |
+| Bearer トークン | 衛星サービス | 同期 API | Project（role なし） |
+
+---
+
+## UI セッション認証
+
+### パスワード保存
+
+PHC string 形式で保存する。アルゴリズム識別子・パラメータ・ソルト・ハッシュを1文字列に内包する。
+
+```
+$pbkdf2-sha256$i=600000$<16-byte-CSPRNG-salt-base64>$<hash-base64>
+```
+
+- **既定アルゴリズム:** WebCrypto PBKDF2-SHA256
+- **イテレーション:** 600,000（OWASP 2023 基準）
+- **ソルト:** 16 バイト CSPRNG（per-user）
+- **透過再ハッシュ:** ログイン成功時にプレフィックスでアルゴリズム判定し、旧形式なら新形式で再ハッシュして保存。argon2 への無停止移行を可能にする。
+- **実装場所:** `Auth` インターフェース裏に隔離
+
+### セッション管理
+
+セッションは D1/SQLite 上の `Session` テーブルで管理する（KV 依存を排除しポータビリティ維持）。Cookie には署名付きセッション ID のみを載せる。
+
+**Cookie 属性（必須）:**
+
+```
+HttpOnly; Secure; SameSite=Lax; Path=/
+```
+
+**署名鍵:**
+- Secret 管理（CF Secret / オンプレは secret manager）
+- 鍵 ID をプレフィックスに埋め込み、新鍵発行・旧鍵検証の猶予期間で無停止ローテーション
+
+**検証フロー（三段 AND）:**
+
+```
+署名検証 → DB 存在確認 → expires_at > now
+```
+
+すべて通過しなければ 401。超過セッションは行削除。
+
+**不変条件:**
+- ログイン成功時にセッション ID を必ず再発行する（セッション固定攻撃対策）
+- ログアウト API で Session 行を削除する
+- パスワード変更・role 変更時は当該 user の全セッションを無効化する（`DELETE FROM Session WHERE user_id = ?`）
+
+### CSRF 防御
+
+- **一次防御:** `SameSite=Lax`
+- **二次防御:** 状態変更メソッド（POST / PATCH / DELETE）に double-submit CSRF トークンを必須とする
+- HTMX は `hx-headers` で CSRF トークンを全変更リクエストに自動付与
+- **不変条件:** GET は副作用なし（CSRF 対策不要を前提とする）
+
+---
+
+## API トークン認証（衛星サービス用）
+
+### トークン生成
+
+| 項目 | 仕様 |
+|---|---|
+| エントロピー | `crypto.getRandomValues` で 32 バイト以上 |
+| エンコード | base64url |
+| プレフィックス | 識別子付き（例: `tms_...`） |
+| 検証 | Zod で長さ下限を検証し「高エントロピー前提」を契約化 |
+
+### トークン保存・照合
+
+- **保存形式:** 決定的 SHA-256（salt なし）
+- **照合:** `token_hash` 列にインデックス → Bearer 受信時に完全一致で O(1) シーク
+- **安全性の根拠:** 32 バイト以上の CSPRNG による高エントロピートークン前提
+
+### 失効
+
+ソフト失効（`revoked_at` を打つ）。失効は記録列ではなく認証述語に内包する:
+
+```sql
+SELECT ... WHERE token_hash = ? AND revoked_at IS NULL
+```
+
+ヒットしなければ 401。失効済みトークンは「存在しない」として弾かれる。
+
+### 平文の隔離
+
+- 発行レスポンスに `Cache-Control: no-store`
+- 平文はログ・`TestCaseHistory`・監査・エラーボディに一切含めない
+- 記録は `token:<id>` 形式のみ
+
+### ライフサイクル API（admin 限定）
+
+| 操作 | エンドポイント | 備考 |
+|---|---|---|
+| 発行 | `POST /api/v1/projects/:pid/tokens` | レスポンス body で平文を1回だけ返す。以後取得不可 |
+| 一覧 | `GET /api/v1/projects/:pid/tokens` | id / name / created_at / revoked_at / last_used_at のみ |
+| 失効 | `DELETE /api/v1/projects/:pid/tokens/:id` | `revoked_at` を打つソフト失効 |
+
+### last_used_at 更新
+
+- best-effort・非ブロッキング（更新失敗で認証を落とさない）
+- 間引き更新（前回更新から閾値（例: 1分）経過時のみ）で D1 単一ライタ負荷を回避
+
+---
+
+## テナント境界
+
+マルチテナントの論理境界を最初から全データアクセスに通す。
+
+### 構造的保証
+
+1. `Organization` を第一級エンティティとし、`Project.organization_id` を必須 FK にする
+2. `Storage` インターフェースの全メソッドが `orgScope` を必須引数とする — 越境クエリをコンパイル時に防止
+3. API トークンは project スコープ（→ org）。`:pid` の org 不一致は **403**
+4. MVP は単一 org を seed して運用するが、コードパスは常に org を通す
+
+### IDOR の構造防止
+
+フラットパスを廃止し、全リソースを `/api/v1/projects/:pid/...` 配下に階層化する。
+
+共通前段ミドルウェアが `id → project_id → organization_id` を1クエリで解決し、リクエスタのスコープと不一致なら **404**（存在隠蔽 = 列挙攻撃の無効化）。検証済み scope を downstream に注入し、ハンドラ個別の認可漏れを根絶する。
+
+---
+
+## 認証・認可ミドルウェア執行仕様
+
+各ルートに能力メタデータ（許可認証方式・最低 role）を型付き宣言し、共通ミドルウェアが機械的に執行する。
+
+### 到達面分離（能力マトリクス）
+
+| 主体 | 認証方式 | 到達可能 | 禁止（→ 403） |
+|---|---|---|---|
+| 衛星トークン | Bearer（project scope・role なし） | `POST /sync/*`、自 project の参照系 GET | testcase PATCH/DELETE/status 変更・token 管理・project 作成 |
+| UI ユーザー | セッション Cookie（org scope・role 有り） | role 準拠の CRUD・status・archive・token 管理 | 他 org（→ 404）・role 超過（→ 403） |
+
+### ロールベースアクセス制御（RBAC）
+
+| 操作 | 最低 role |
+|---|---|
+| 参照系 GET | viewer |
+| testcase 作成・編集・status 変更・archive | editor |
+| token 発行・失効・project 作成・user 管理 | admin |
+
+### 失効・有効性の執行
+
+失効・有効性チェックを「認証述語」に内包する（記録列ではなく執行点に置く）。
+
+- **トークン:** `WHERE token_hash = ? AND revoked_at IS NULL`
+- **セッション:** `WHERE id = ? AND expires_at > :now`
+
+三段 AND（署名検証 → DB 存在 → 未失効）を共通関数化し、全保護ルートが必ず通る。
+
+---
+
+## 流量制御（レートリミット）
+
+### ポータビリティ境界
+
+`RateLimiter` は `Storage` / `Auth` に続く**第4のポータビリティ境界**として定義する。アプリ本体は `RateLimiter` インターフェースのみ参照する。
+
+| 環境 | 実装 |
+|---|---|
+| Cloudflare | Workers Rate Limiting binding（2025-09 GA） |
+| オンプレ | プロセス内カウンタ or Redis アダプタ |
+
+**位置づけ:** best-effort・eventually consistent。D1 にカウンタ行を置く方式は単一ライタ自己圧迫のため不採用。
+
+### 衛星トークン向け流量制限
+
+トークン別に単位時間あたりのリクエスト数を制限する。fingerprint の暴走（observation insert 頻度の異常）も検知・ブロックし、D1 容量爆発を防ぐ。
+
+### 認証ブルートフォース防御
+
+衛星トークン用の流量制限とは**別立て**で実装する。
+
+| 項目 | 仕様 |
+|---|---|
+| 単位 | `(account, IP)` 別の永続カウンタ |
+| ストア | D1 or CF Rate Limiting binding |
+| 対策 | ロックアウト + 指数バックオフ |
+| 記録 | 認証失敗イベントを認証監査に記録（TestCaseHistory とは隔離） |
+
+---
+
+## Auth インターフェース抽象化
+
+認証ロジックは `Auth` インターフェースとして抽象化する。
+
+```
+アプリ本体 → Auth インターフェース ← 実装アダプタ
+                                       ├─ 内蔵実装（PBKDF2 / Session / Cookie）
+                                       └─ 外部 IdP アダプタ（オンプレ差し替え用）
+```
+
+- Cloudflare Access は「使うなら前段の任意オプション」であり、本体は依存しない
+- オンプレでは外部 IdP（LDAP / OIDC 等）への差し替えが可能
+- パスワードハッシュ・セッション管理・トークン検証のすべてが `Auth` 裏に隔離される
+
+---
+
+## セキュリティ不変条件まとめ
+
+| 不変条件 | 保証手段 |
+|---|---|
+| テナント越境不可 | Storage 全メソッド orgScope 必須・ミドルウェア前段検証 |
+| IDOR 不可 | パス階層化 + id → org 解決 + 不一致 404 |
+| セッション固定不可 | ログイン成功時にセッション ID 再発行 |
+| 失効トークン素通り不可 | 認証述語に失効チェック内包 |
+| トークン平文漏洩不可 | SHA-256 ハッシュのみ保存・ログ/履歴/エラーに含めない |
+| CSRF 不可 | SameSite=Lax + double-submit token（状態変更メソッド） |
+| パスワード総当たり不可 | `(account, IP)` 別ロックアウト + 指数バックオフ |
+| History 改竄不可 | TestCaseHistory は追記専用（UPDATE/DELETE 禁止） |
+| viewer 越権不可 | ルートメタデータ駆動 RBAC をミドルウェアが機械執行 |
