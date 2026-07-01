@@ -638,24 +638,19 @@ Feature: 決済処理
 | G-05 | drift / stale でのフィルタ | テストケース一覧 API の `drift` / `is_stale` パラメータで定義 |
 | G-06 | target での絞り込み | テストケース一覧 API の `target` パラメータで定義 |
 | G-07 | 一括操作（バルク承認・バルクアーカイブ） | `POST /api/v1/projects/:pid/testcases/bulk` で定義 |
+| G-08 | 同期結果のサマリー表示 | S-08 テストケース一覧に同期サマリーパネルを設計（最終同期日時・新規/drift/stale件数・クリックでフィルタ適用） |
 | G-09 | archived からの復帰操作 | 状態機械に archived → draft 遷移を追加。PATCH API または bulk `restore` で実行 |
 | G-10 | approved → draft の遷移 | 状態機械に approved → draft 遷移を追加。PATCH API で実行 |
 
-### MVP 推奨（未解決）
-
-| # | 機能 | 理由 |
-|---|---|---|
-| G-08 | 同期結果のサマリー表示 | commit レスポンスに mappings は含まれるが、UI 上のサマリー表示の設計が未定義 |
-
 ### MVP 後（実運用フィードバックを経て検討）
 
-| # | 機能 | 理由 |
-|---|---|---|
-| G-11 | ダッシュボード（統計・概要） | QA リード / PM の品質監督に必要 |
-| G-12 | テストレベル分類（unit / integration / e2e） | カテゴリだけでは分類が不十分 |
-| G-13 | フリーテキスト検索 | テストケース数が増えると必須になる |
-| G-14 | CSV エクスポート | 外部共有・レポート |
-| G-15 | Gherkin エクスポート | 仕様書としての利用 |
-| G-16 | テストケースへのコメント・メモ | レビュー時の申し送り。HITL 承認ワークフローと同時に |
-| G-17 | パスワードリセット（セルフサービス） | メール送信基盤が必要。MVP は管理者手動リセットで代替 |
-| G-18 | レポート・集計・推移グラフ | 品質メトリクスの可視化 |
+| # | 機能 | 理由 | UI設計 |
+|---|---|---|---|
+| G-11 | ダッシュボード（統計・概要） | QA リード / PM の品質監督に必要 | 設計済み（[S-05](./screens/main/S-05-dashboard.md)）。集計 API 未定義 |
+| G-12 | テストレベル分類（unit / integration / e2e） | カテゴリだけでは分類が不十分 | 未設計 |
+| G-13 | フリーテキスト検索 | テストケース数が増えると必須になる | 設計済み（[S-08](./screens/testcase/S-08-testcase-list.md) `filter-search`）。API 未定義 |
+| G-14 | CSV エクスポート | 外部共有・レポート | 設計済み（[S-21](./screens/admin/S-21-report-export.md)）。API 未定義 |
+| G-15 | Gherkin エクスポート | 仕様書としての利用 | 設計済み（[S-13](./screens/testcase/S-13-gherkin-view.md) `btn-export-gherkin`）。Gherkin 取得 API は定義済み |
+| G-16 | テストケースへのコメント・メモ | レビュー時の申し送り。HITL 承認ワークフローと同時に | 未設計 |
+| G-17 | パスワードリセット（セルフサービス） | メール送信基盤が必要。MVP は管理者手動リセットで代替 | 設計済み（[S-03](./screens/auth/S-03-password-reset-request.md), [S-04](./screens/auth/S-04-password-reset-execute.md)）。API 未実装 |
+| G-18 | レポート・集計・推移グラフ | 品質メトリクスの可視化 | 設計済み（[S-21](./screens/admin/S-21-report-export.md)）。API 未定義 |
