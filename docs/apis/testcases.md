@@ -324,6 +324,13 @@ OCC の詳細は [api-reference.md](../api-reference.md#楽観的排他制御occ
 
 セッション Cookie または API トークン。viewer 以上のロール。
 
+### クエリパラメータ
+
+| パラメータ | 型 | 説明 |
+|---|---|---|
+| cursor | string | ページングカーソル |
+| limit | integer | 1ページあたりの件数 |
+
 ### レスポンス仕様
 
 **200 OK**
