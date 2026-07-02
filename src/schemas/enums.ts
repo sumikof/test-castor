@@ -1,0 +1,13 @@
+export const ROLES = ['admin', 'editor', 'viewer'] as const;
+export const STATUSES = ['draft', 'approved', 'archived'] as const;
+export const CATEGORIES = ['normal', 'abnormal', 'boundary', 'error_handling'] as const;
+export const OWNERSHIPS = ['machine', 'human'] as const;
+export const HISTORY_ACTIONS = ['created', 'updated', 'status_changed', 'imported'] as const;
+export const SYNC_SESSION_STATUSES = ['active', 'committed', 'expired'] as const;
+export const BULK_ACTIONS = ['approve', 'archive', 'restore'] as const;
+export type Role = (typeof ROLES)[number];
+export type Status = (typeof STATUSES)[number];
+export type Category = (typeof CATEGORIES)[number];
+export type Ownership = (typeof OWNERSHIPS)[number];
+export type HistoryAction = (typeof HISTORY_ACTIONS)[number];
+export type BulkAction = (typeof BULK_ACTIONS)[number];
