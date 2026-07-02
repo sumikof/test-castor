@@ -1,0 +1,13 @@
+// wrangler.jsonc
+{
+  "name": "tms-web-service",
+  "main": "src/entry/workers.ts",
+  "compatibility_date": "2026-06-01",
+  "assets": { "directory": "./public", "binding": "ASSETS" },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "tms", "database_id": "REPLACE_ON_DEPLOY", "migrations_dir": "migrations" }
+  ],
+  "triggers": { "crons": ["0 * * * *"] },
+  "vars": { "SESSION_TTL_MS": "604800000" }
+  // SESSION_SIGNING_KEYS は secret: wrangler secret put SESSION_SIGNING_KEYS(形式は Task 6 参照)
+}

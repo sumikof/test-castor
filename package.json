@@ -1,0 +1,36 @@
+{
+  "name": "tms-web-service",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "typecheck": "tsc --noEmit",
+    "test:unit": "vitest run --config vitest.config.ts",
+    "test:workers": "vitest run --config vitest.workers.config.ts",
+    "test": "npm run test:unit && npm run test:workers",
+    "db:generate": "drizzle-kit generate",
+    "postinstall": "node -e \"require('fs').copyFileSync(require.resolve('htmx.org/dist/htmx.min.js'),'public/htmx.min.js')\""
+  },
+  "dependencies": {
+    "hono": "^4.8.0",
+    "zod": "^4.0.0",
+    "drizzle-orm": "^0.44.0",
+    "@hono/zod-validator": "^0.7.0"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^12.0.0",
+    "@libsql/client": "^0.15.0",
+    "@hono/node-server": "^1.15.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0",
+    "vitest": "~3.2.0",
+    "@cloudflare/vitest-pool-workers": "^0.8.0",
+    "wrangler": "^4.0.0",
+    "@cloudflare/workers-types": "^4.20260601.0",
+    "drizzle-kit": "^0.31.0",
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^22.0.0",
+    "htmx.org": "^2.0.0"
+  }
+}
