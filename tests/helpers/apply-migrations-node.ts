@@ -1,9 +1,3 @@
-import { readdirSync, readFileSync } from 'node:fs';
-import path from 'node:path';
-export function migrationStatements(dir = path.join(process.cwd(), 'migrations')): string[] {
-  return readdirSync(dir)
-    .filter((f) => f.endsWith('.sql'))
-    .sort()
-    .map((f) => readFileSync(path.join(dir, f), 'utf8'))
-    .flatMap((text) => text.split('--> statement-breakpoint'));
-}
+// 実体は src/storage/migrations-loader.ts。src/ が tests/ を import しない方針(逆方向は許容)を保つため、
+// このファイルは既存の import パスを維持するための再エクスポートのみを行う。
+export { migrationStatements } from '../../src/storage/migrations-loader';
