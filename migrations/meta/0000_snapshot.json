@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "590be7c0-984f-4439-baf6-9e430ca0ec99",
+  "id": "0bc3b03c-5f7f-4605-910b-483b8a6101f0",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "api_tokens": {
@@ -744,6 +744,19 @@
         }
       },
       "foreignKeys": {
+        "test_case_observations_test_case_id_test_cases_id_fk": {
+          "name": "test_case_observations_test_case_id_test_cases_id_fk",
+          "tableFrom": "test_case_observations",
+          "tableTo": "test_cases",
+          "columnsFrom": [
+            "test_case_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
         "test_case_observations_project_id_projects_id_fk": {
           "name": "test_case_observations_project_id_projects_id_fk",
           "tableFrom": "test_case_observations",

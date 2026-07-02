@@ -94,7 +94,7 @@ export const testCaseIdentities = sqliteTable('test_case_identities', {
 
 export const testCaseObservations = sqliteTable('test_case_observations', {
   id: text('id').primaryKey(),
-  testCaseId: text('test_case_id'), // 新規ケースは commit 工程で backfill(data-model)
+  testCaseId: text('test_case_id').references(() => testCases.id), // 新規ケースは commit 工程で backfill(data-model)
   externalRef: text('external_ref').notNull(),
   projectId: text('project_id').notNull().references(() => projects.id),
   fingerprint: text('fingerprint').notNull(),

@@ -101,6 +101,7 @@ CREATE TABLE `test_case_observations` (
 	`origin` text NOT NULL,
 	`confidence` real,
 	`created_at` integer NOT NULL,
+	FOREIGN KEY (`test_case_id`) REFERENCES `test_cases`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint
