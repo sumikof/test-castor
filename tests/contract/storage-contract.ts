@@ -429,14 +429,18 @@ export function runStorageContract(name: string, factory: () => Promise<Contract
       expect(notFound).toEqual({ kind: 'not_found' });
     });
 
-    // review round 1(CRITICAL OCC concurrency)回帰テスト。2つのリクエストが両方とも同じ version(=1)を
-    // 読んでから競走する状況を、逐次呼び出しで決定的に再現する: 「勝者」が version=1→2 に書き込んだ後、
-    // 「敗者」が(自分がまだ version=1 だと思ったまま)同じ expectedVersion=1 で書き込みを試みる。
-    // 修正前は敗者側の UPDATE の WHERE version=1 が実際には0行にしか一致しないにもかかわらず、対になる
-    // history INSERT が無条件に実行され、`{...current, ...setValues}` で組み立てた捏造行を伴う
-    // {kind:'ok'} が返っていた(=偽の成功 + phantom history)。本テストは敗者が必ず {kind:'conflict'} を
-    // 返すこと、かつ history 行数が敗者の呼び出し前後で増えないこと(phantom entry 無し)を固定する。
-    it('testcases: review round 1 回帰 — patchTestCase は stale expectedVersion で history を増やさず必ず conflict を返す(phantom-history + false-success ガード)', async () => {
+    // review round 1(CRITICAL OCC concurrency)回帰テスト・ただし逐次(sequential)版。「勝者」の
+    // patchTestCase を await で完全に完了させてから「敗者」を呼ぶため、敗者自身の事前チェック
+    // (getTestCase)は既に更新後の行(version=2)を読む。つまりこのテストが検出できるのは
+    // 「消費済み(既に他の書き込みで進んだ)stale expectedVersion を指定した単純な再試行が conflict に
+    // なること」のみであり、新旧どちらのコードでも同じ結果になる(事前チェックの version 不一致
+    // ショートカットだけで判別できてしまうため)。
+    // 「2つのリクエストが両方とも同じ version を読んでから競走する」という本物の並行レース
+    // (事前チェック時点ではどちらの expectedVersion も一致してしまう状況)の検出には、真の非同期
+    // インターリーブが必要であり、これは occ-concurrency.test.ts の Promise.all ベースの
+    // プロパティテスト(libsql アダプタ)が担う。本テストはそれより弱いが無意味ではない
+    // 回帰(消費済み stale version の単純な再試行が history を増やさず conflict になること)として残す。
+    it('testcases: 順次(sequential)— 既に消費された stale expectedVersion での patchTestCase 再試行は history を増やさず必ず conflict を返す(真の並行レース検出は occ-concurrency.test.ts 参照)', async () => {
       const p = await ctx.storage.createProject(scope, { name: 'proj-patch-race' }, now);
       const created = await ctx.storage.createTestCaseManual(scope, p.id, tcInput({ title: 'race-v1' }), historyEntry(), now);
       expect(created.version).toBe(1);
@@ -607,10 +611,15 @@ export function runStorageContract(name: string, factory: () => Promise<Contract
       expect(notFound).toEqual({ kind: 'not_found' });
     });
 
-    // review round 1(CRITICAL OCC concurrency)回帰テスト。patchTestCase と同じ形の「敗者」再現
-    // (コメント詳細はそちらの回帰テスト参照)。acceptFingerprint は no_drift 判定を OCC より先に行うため、
-    // 「敗者」の再試行の直前に drift を再度1へ戻す(no_drift ではなく conflict パスを純粋に検証するため)。
-    it('testcases: review round 1 回帰 — acceptFingerprint は stale expectedVersion で history を増やさず必ず conflict を返す(phantom-history + false-success ガード)', async () => {
+    // review round 1(CRITICAL OCC concurrency)回帰テスト・ただし逐次(sequential)版。patchTestCase の
+    // 逐次版回帰テストと同じ形の「敗者」再現であり、同じ限界を持つ(コメント詳細はそちらの逐次版回帰
+    // テスト参照): 敗者の事前チェックは既に更新後の行を読むため、事前チェックの version 不一致
+    // ショートカットだけで判別でき、新旧どちらのコードでも同じ結果になる。真の並行レース(2つの
+    // リクエストが両方とも同じ version・同じ drift=true を読んでから競走する状況)の検出は
+    // occ-concurrency.test.ts の Promise.all ベースのプロパティテストが担う。
+    // acceptFingerprint は no_drift 判定を OCC より先に行うため、「敗者」の再試行の直前に drift を
+    // 再度1へ戻す(no_drift ではなく conflict パスを純粋に検証するため)。
+    it('testcases: 順次(sequential)— 既に消費された stale expectedVersion での acceptFingerprint 再試行は history を増やさず必ず conflict を返す(真の並行レース検出は occ-concurrency.test.ts 参照)', async () => {
       const p = await ctx.storage.createProject(scope, { name: 'proj-fp-race' }, now);
       const created = await ctx.storage.createTestCaseManual(scope, p.id, tcInput({ title: 'fp-race' }), historyEntry(), now);
       await ctx.rawExec(`UPDATE test_cases SET drift=1, fingerprint='old-fp', mirror_origin='discovery-v1' WHERE id='${created.id}'`);
