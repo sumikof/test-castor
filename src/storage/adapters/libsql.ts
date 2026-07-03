@@ -6,11 +6,12 @@ import { migrationStatements } from '../migrations-loader';
 
 export async function createLibsqlStorage(url = ':memory:') {
   const client = createClient({ url: url === ':memory:' ? ':memory:' : `file:${url}` });
+  const isFileBacked = url !== ':memory:';
   // operations.md §6.2: 環境固有 PRAGMA は共通マイグレーションでなく、各オンプレアダプタの
   // 接続初期化フックで(テーブル作成前に)適用する。foreign_keys は全モードで必須のため
   // 失敗を握りつぶさない。
   await client.execute('PRAGMA foreign_keys = ON');
-  if (url !== ':memory:') {
+  if (isFileBacked) {
     // operations.md §4.3: auto_vacuum はオンプレ固有の肥大化対策として DB 初期化時
     // (テーブル作成前)に設定。WAL は同時実行性のため。一部の libSQL 実行モードは
     // これらの PRAGMA を拒否することがあるため、その場合は無視する(致命的ではない)。

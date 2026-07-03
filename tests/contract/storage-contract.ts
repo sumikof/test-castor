@@ -106,7 +106,27 @@ export function runStorageContract(name: string, factory: () => Promise<Contract
         await ctx.storage.createSession({ id: `L${i}`, userId: admin.id, expiresAt: now, createdAt: now });
       }
       await ctx.rawExec(`UPDATE sessions SET expires_at = 1 WHERE rowid IN (SELECT rowid FROM sessions WHERE user_id = '${admin.id}' LIMIT 2)`);
+
+      // 検証: UPDATE後、3個中2個が expires_at=1、1個が元の now
+      const updatedL0 = await ctx.storage.getSession('L0');
+      const updatedL1 = await ctx.storage.getSession('L1');
+      const updatedL2 = await ctx.storage.getSession('L2');
+      const updatedSessions = [updatedL0, updatedL1, updatedL2];
+      const updatedCount = updatedSessions.filter((s) => s?.expiresAt === 1).length;
+      const untouchedCount = updatedSessions.filter((s) => s?.expiresAt === now).length;
+      expect(updatedCount).toBe(2);
+      expect(untouchedCount).toBe(1);
+
       await ctx.rawExec(`DELETE FROM sessions WHERE rowid IN (SELECT rowid FROM sessions WHERE expires_at = 1 LIMIT 2)`);
+
+      // 検証: DELETE後、3個中1個が残り、それは未更新のセッション(expiresAt===now)
+      const remainingL0 = await ctx.storage.getSession('L0');
+      const remainingL1 = await ctx.storage.getSession('L1');
+      const remainingL2 = await ctx.storage.getSession('L2');
+      const remainingSessions = [remainingL0, remainingL1, remainingL2];
+      const remaining = remainingSessions.filter((s) => s !== null);
+      expect(remaining.length).toBe(1);
+      expect(remaining[0]!.expiresAt).toBe(now);
     });
   });
 }
