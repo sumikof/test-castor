@@ -168,6 +168,13 @@ export const testCaseHistory = sqliteTable('test_case_history', {
   createdAt: integer('created_at').notNull(),
 }, (t) => [
   index('ix_history_tc_time').on(t.testCaseId, t.createdAt),
+  // review round 1(sync commit の重複 imported 防止): test_case 1件につき action='imported' の履歴は
+  // 厳密に1行という不変条件(sync-protocol.md 工程1)を DB 層でも強制する部分一意索引。JS 側の事前
+  // チェック(drizzle-storage.ts の existingHistoryTcIds)だけでは、同一 token に対する2つの
+  // syncCommitWindow 呼び出しが並行実行された場合に TOCTOU が生じ、重複 imported 行が挿入されうる
+  // (tests/contract/occ-concurrency.test.ts の並行テストで再現)。uq_active_session と同じ手法
+  // (部分一意索引 + onConflictDoNothing)で防ぐ。
+  uniqueIndex('uq_history_imported_per_tc').on(t.testCaseId).where(sql`${t.action} = 'imported'`),
   check('ck_history_action', sql`${t.action} IN ('created','updated','status_changed','imported')`),
 ]);
 

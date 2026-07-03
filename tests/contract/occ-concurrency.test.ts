@@ -179,3 +179,104 @@ describe('OCC concurrency (review round 2): 同一 version 同時書き込みの
     },
   );
 });
+
+// task-16 review round 1(discriminating concurrency test): sync commit の imported history 重複防止。
+//
+// なぜこのブロックが必要か: drizzle-storage.ts の syncCommitWindow 工程1b(history INSERT,
+// action='imported')は、JS 側の事前チェック(existingHistoryTcIds)で「まだ imported 履歴が無い
+// test_case_id」だけに絞ってから INSERT していたが、その INSERT 自体には .onConflictDoNothing() が
+// 無く、対応する一意制約も存在しなかった。そのため、同一 token に対する2つの syncCommitWindow 呼び出しが
+// 真に並行実行されると、両方が「まだ無い」という同じスナップショットを読んでから競走し、同一
+// test_case_id に対して imported 履歴が2重に INSERT されうる(「test_case 1件につき imported は厳密に
+// 1行」という不変条件の違反。監査ログの水増し)。修正は schema.ts の部分一意索引
+// uq_history_imported_per_tc(test_case_id) WHERE action='imported' + 該当 INSERT への
+// .onConflictDoNothing() で、DB 層に真の保証を持たせる。
+//
+// 上のブロックと同じ理由(non-widePromise.all による真のインターリーブには非同期I/Oが必須)で libsql を
+// 直接使う。2つの syncCommitWindow 呼び出しは同一 token・同一 external_ref を対象にするため、工程0
+// (同定採番)で同一 newTestCaseId に収束した後、工程1b の事前チェック SELECT が両方とも「まだ無い」を
+// 読んでから競走する窓が生まれる。
+//
+// 不変条件(修正済みコードなら逐次・並行いずれのスケジューリングでも必ず成立):
+//   - 新規 canonical 1件につき action='imported' の history は exactly 1 行(重複無し)
+//   - canonical(test_cases)・identity(test_case_identities)も exactly 1 件(工程1a/工程2 の既存の
+//     onConflictDoNothing により、こちらは修正前から保護されている。ここでも明示的に検証する)
+//
+// シナリオを12回繰り返す(ITERATIONS。上のブロックと同じ理由で単発の成功は判別力が無いため)。
+// 旧コード(このタスクの review round 1 以前。onConflictDoNothing 無し・部分一意索引無し)に対しては、
+// 本タスク実行時に schema.ts/drizzle-storage.ts を一時的に旧実装へ戻して本ブロックを実行し、実際に
+// 「imported history 2行」という形で落ちることを確認し、その後正しい修正版へ復元した
+// (task-16-report.md「Fix report(review round 1)」に確認ログを記載)。
+describe(
+  'OCC concurrency (task-16 review round 1): 同一 token の並行 syncCommitWindow による imported history ' +
+    '重複防止(libsql・真の非同期インターリーブ)',
+  () => {
+    let storage: Storage;
+    let scope: { organizationId: string };
+    let projectId: string;
+    const now = 1_700_000_000_000;
+    const IDENTITY_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+
+    beforeEach(async () => {
+      const created = await createLibsqlStorage(':memory:');
+      storage = created.storage;
+      const org = await storage.setupOrganization({
+        orgName: 'org', adminEmail: 'admin@example.com',
+        adminPasswordHash: '$pbkdf2-sha256$i=1$x$y', adminDisplayName: 'Admin', now,
+      });
+      scope = { organizationId: org.organization.id };
+      const project = await storage.createProject(scope, { name: 'proj-sync-commit-race' }, now);
+      projectId = project.id;
+    });
+
+    it(
+      `concurrent same-token syncCommitWindow: 新規 canonical の imported history は exactly 1 行 ` +
+        `(重複無し)を ${ITERATIONS} 回連続で確認`,
+      async () => {
+        for (let iter = 0; iter < ITERATIONS; iter++) {
+          // origin を iteration ごとに変える: uq_active_session(project_id,origin) WHERE status='active'
+          // は1 origin につき active セッション1本までのため、前 iteration のセッションを finalize せず
+          // 使い回すと2回目以降の syncStart が conflict になってしまう(このテストの関心は finalize では
+          // なく工程1bの重複防止のため、finalize は呼ばず origin をずらして回避する)。
+          const origin = `discovery-race-${iter}`;
+          const token = `tok-race-${iter}`;
+          const externalRef = `ext-race-${iter}`;
+
+          const started = await storage.syncStart(scope, projectId, { token, origin, now, slidingMs: 600_000 });
+          if (started.kind !== 'created') throw new Error('unreachable');
+          await storage.syncAppendObservations(scope, projectId, started.session, [{
+            externalRef,
+            fingerprint: `fp-race-${iter}`,
+            observed: { title: 't', given: 'g', when: 'w', then: 'th', parameters: [], source_ref: {}, schema_version: '1.0' },
+            category: null,
+            confidence: null,
+          }], now + 1);
+
+          const commitParams = { now: now + 2, identityTtlMs: IDENTITY_TTL_MS, windowLimit: 1000, actor: 'token:tok-actor' };
+          // 「同じ token に対する2つの syncCommitWindow 呼び出しが同時に走る」状況を実際に再現する
+          // (Promise.all。事前に一方を await し切ってから他方を呼ぶ逐次実行では、後着側の事前チェックが
+          // 既に着地した履歴を読んでしまい判別力が無くなる。上のOCCブロックと同じ確認済みの落とし穴)。
+          await Promise.all([
+            storage.syncCommitWindow(scope, projectId, token, commitParams),
+            storage.syncCommitWindow(scope, projectId, token, commitParams),
+          ]);
+
+          const mappings = await storage.syncMappings(scope, projectId, token);
+          const testCaseId = mappings.find((m) => m.externalRef === externalRef)?.testCaseId;
+          expect(testCaseId).toBeTruthy();
+
+          const history = await storage.listHistory(scope, projectId, testCaseId!, { limit: 50 });
+          const imported = history.items.filter((h) => h.action === 'imported');
+          expect(imported).toHaveLength(1); // 重複無し(修正前は稀に2行になっていた)
+
+          // canonical/identity は工程1a/工程2 の既存の onConflictDoNothing で修正前から単一だったが、
+          // 「並行実行全体として何も壊れていない」ことをここでも明示的に確認する。
+          const tc = await storage.getTestCase(scope, projectId, testCaseId!);
+          expect(tc).not.toBeNull();
+          const identities = await storage.listIdentities(scope, projectId, testCaseId!);
+          expect(identities).toHaveLength(1);
+        }
+      },
+    );
+  },
+);

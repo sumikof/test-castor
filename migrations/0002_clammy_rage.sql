@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `uq_history_imported_per_tc` ON `test_case_history` (`test_case_id`) WHERE "test_case_history"."action" = 'imported';

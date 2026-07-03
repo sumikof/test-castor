@@ -384,11 +384,14 @@ export interface Storage {
 
   /**
    * commit 工程8(セッション確定)。COUNT 3本(created=SyncStaging行数/changed=DISTINCT external_ref in
-   * observations(:T)/staled=(P,O)で last_seen_sync_token!=:T の identity 数)を算出し、
-   * `UPDATE sync_sessions SET status='committed', committed_at, *_count WHERE token=:T AND
-   * status='active'` と同一 batch で書く(スペック D-01)。
+   * observations(:T)/staled=(P,O)で last_seen_sync_token!=:T の identity 数)を、`UPDATE sync_sessions
+   * SET status='committed', committed_at, *_count WHERE token=:T AND status='active'` の SET 句に
+   * 相関サブクエリとして畳み込んだ**単一 UPDATE 文**で書く(スペック D-01「同一バッチ」)。review round 1
+   * 以前は3本の SELECT COUNT を先に実行してから別文で UPDATE していたため、読み取りと書き込みの間に
+   * 他プロセスが割り込める TOCTOU が残っていた(drizzle-storage.ts の実装コメント参照)。相関サブクエリ化
+   * によりカウント算出と committed 遷移が物理的に1文になり、この隙間が構造的に無くなる。
    *
-   * 冪等: 呼び出し時点で既に committed なら、再計算せず保存済みの *_count をそのまま返し
+   * 冪等: 呼び出し時点で既に committed なら、UPDATE 自体を実行せず保存済みの *_count をそのまま返し
    * `alreadyCommitted:true`。UPDATE の対象行が(競合等で)0件だった場合も同様に保存済み値へフォール
    * バックする(`AND status='active'` により2重 finalize が2重に着地しない)。
    */

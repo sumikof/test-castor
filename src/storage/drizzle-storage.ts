@@ -952,6 +952,15 @@ export function createDrizzleStorage(driver: StorageDriver): Storage {
 
         // 工程1b: history INSERT(action='imported')。NOT EXISTS(imported history) でガードするため、
         // 前回呼び出しで工程1a(canonical)だけが完了していた場合でも history だけが正しく追いつける。
+        // このJS側の事前チェック(existingHistoryTcIds)は「大半の行は既に history 済み」という再開時の
+        // 通常ケースを安く弾く fast-path に過ぎない。事前チェックの SELECT と実際の INSERT の間には
+        // TOCTOU があり、同一 token に対する2つの syncCommitWindow 呼び出しが並行実行されると、両方とも
+        // 同じ空の existingHistoryTcIds を読んでから競走し、同一 test_case_id に対する imported 行が
+        // 2重に INSERT されうる(review round 1 で発見。occ-concurrency.test.ts の並行テストで再現)。
+        // 「test_case 1件につき imported は厳密に1行」という不変条件の実際の保証は、schema.ts の部分
+        // 一意索引 uq_history_imported_per_tc(test_case_id) WHERE action='imported' と、その違反を
+        // 静かに無視する下記 .onConflictDoNothing() が担う(JS 側の事前チェックはこの DB 側ガードの
+        // 前段最適化であり、正しさそのものには寄与しない)。
         const existingHistoryTcIds = new Set<string>();
         for (const batch of toBatches(allNewIds, ID_LOOKUP_BATCH_SIZE)) {
           const rows: Array<{ testCaseId: string }> = await db
@@ -965,7 +974,7 @@ export function createDrizzleStorage(driver: StorageDriver): Storage {
             id: uuid(), testCaseId: s.newTestCaseId, actor, action: 'imported' as const, delta: '{}', createdAt: now,
           }));
           for (const batch of toBatches(rows, HISTORY_BATCH_ROWS)) {
-            await driver.batch([db.insert(testCaseHistory).values(batch)]);
+            await driver.batch([db.insert(testCaseHistory).values(batch).onConflictDoNothing()]);
           }
         }
 
@@ -1080,12 +1089,20 @@ export function createDrizzleStorage(driver: StorageDriver): Storage {
       return { more };
     },
 
-    // 工程8(セッション確定)。スペック D-01: COUNT 3本 + committed 遷移を1 batch で。
+    // 工程8(セッション確定)。スペック D-01「同一バッチ」。
+    // review round 1(D-01 原子性): 旧実装は3本の SELECT COUNT で値を読んでから別文で UPDATE していた。
+    // これは読み取り(COUNT)と書き込み(committed 遷移)の間に他プロセスが割り込める TOCTOU で、
+    // 「同一バッチ」というスペック文言(1 SQL 文 = 不可分)を満たしていなかった(driver.batch でまとめては
+    // いたが、COUNT 自体はそのバッチの外で確定した値を単に定数として書き込むだけだった)。
+    // 3つの COUNT を UPDATE の SET 句の相関サブクエリとして畳み込み、commit 遷移(status/committed_at)
+    // と物理的に同一の1 SQL 文にすることで、読み取りと書き込みを不可分にする。
     async syncFinalize(scope: OrgScope, pid: string, token: string, now: number) {
       const session = await getSyncSessionRow(pid, token);
       if (!session) throw new Error('syncFinalize: sync session not found');
 
       if (session.status === 'committed') {
+        // 冪等: 既に committed なら再計算しない(相関サブクエリを再実行して既存の committed_at/*_count を
+        // 誤って上書きしないよう、UPDATE 自体を実行せずここで短絡する)。
         return {
           createdCount: session.createdCount ?? 0,
           changedCount: session.changedCount ?? 0,
@@ -1094,43 +1111,38 @@ export function createDrizzleStorage(driver: StorageDriver): Storage {
         };
       }
 
-      const [createdRow] = await db.select({ n: count() }).from(syncStaging).where(eq(syncStaging.syncToken, token));
-      const createdCount = Number(createdRow?.n ?? 0);
-
-      const [changedRow] = await db
-        .select({ n: sql<number>`COUNT(DISTINCT ${testCaseObservations.externalRef})` })
-        .from(testCaseObservations)
-        .where(eq(testCaseObservations.syncToken, token));
-      const changedCount = Number(changedRow?.n ?? 0);
-
-      const [staledRow] = await db.select({ n: count() }).from(testCaseIdentities)
-        .where(and(
-          eq(testCaseIdentities.projectId, pid),
-          eq(testCaseIdentities.origin, session.origin),
-          ne(testCaseIdentities.lastSeenSyncToken, token), // NULL は工程4と同じ理由で対象外(タスク報告参照)
-        ));
-      const staledCount = Number(staledRow?.n ?? 0);
-
+      const origin = session.origin;
       const counts = await driver.batch([
         db.update(syncSessions)
-          .set({ status: 'committed', committedAt: now, createdCount, changedCount, staledCount })
+          .set({
+            status: 'committed',
+            committedAt: now,
+            createdCount: sql`(SELECT COUNT(*) FROM sync_staging WHERE sync_token = ${token})`,
+            changedCount: sql`(SELECT COUNT(DISTINCT external_ref) FROM test_case_observations WHERE sync_token = ${token})`,
+            // NULL(last_seen_sync_token が一度も確定していない identity)は工程4と同じ理由で対象外
+            // (SQL の != は NULL に対して unknown を返すため、追加のガードなしで自然に除外される)。
+            staledCount: sql`(
+              SELECT COUNT(*) FROM test_case_identities
+              WHERE project_id = ${pid} AND origin = ${origin} AND last_seen_sync_token != ${token}
+            )`,
+          })
           .where(and(eq(syncSessions.token, token), eq(syncSessions.status, 'active'))),
       ]);
 
-      if ((counts[0] ?? 0) === 0) {
-        // AND status='active' に0行しか一致しなかった(他プロセスが先に committed 済み)。保存済み値へ
-        // フォールバックする(冪等。sync-protocol.md「OCC 競合(commit 内部) — 発生しない」の想定外だが
-        // belt-and-suspenders として安全側に倒す)。
-        const after = await getSyncSessionRow(pid, token);
-        return {
-          createdCount: after?.createdCount ?? 0,
-          changedCount: after?.changedCount ?? 0,
-          staledCount: after?.staledCount ?? 0,
-          alreadyCommitted: true,
-        };
-      }
-
-      return { createdCount, changedCount, staledCount, alreadyCommitted: false };
+      // UPDATE の affected 行数を根拠に分岐する(review round 1 の OCC 規約と同じ: 事前チェックの
+      // スナップショットではなく実際に何が書けたかで判定する)。0行なら AND status='active' に一致しな
+      // かった(他プロセスが先に committed 済み)ということなので、保存済み値へフォールバックする
+      // (冪等。sync-protocol.md「OCC 競合(commit 内部) — 発生しない」の想定外だが belt-and-suspenders
+      // として安全側に倒す)。1行更新できた場合も、SET 句の相関サブクエリが実際に計算・永続化した値を
+      // アプリ側で二重に計算せず、読み戻した実際の値をそのまま信頼して返す。
+      const alreadyCommitted = (counts[0] ?? 0) === 0;
+      const after = await getSyncSessionRow(pid, token);
+      return {
+        createdCount: after?.createdCount ?? 0,
+        changedCount: after?.changedCount ?? 0,
+        staledCount: after?.staledCount ?? 0,
+        alreadyCommitted,
+      };
     },
 
     // syncMappings: created(staging)/updated(観測(:T)有り・staging除く)/unchanged(sync_seenのみ)。

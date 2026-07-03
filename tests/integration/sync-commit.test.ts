@@ -486,4 +486,39 @@ describe('統合: commit 8工程パイプライン + GET sync/status(task-16-bri
     const tc = await getTestCase(ctx.app, admin, pid, id1);
     expect(tc.body.is_stale).toBe(false); // 凍結 identity のみのため集約対象から除外され stale が解除される
   });
+
+  // task-16 review round 1(discriminating concurrency test。tests/contract/occ-concurrency.test.ts の
+  // libsql 版と同じ不変条件を D1(miniflare)アダプタでも defense-in-depth として確認する)。
+  // 同一 token への commit 呼び出しを実際に同時発火する(Promise.all)。commit ルートハンドラは
+  // syncCommitWindow を1回だけ呼ぶため(内部でループしない。more:true を返したら呼び出し側が再送する
+  // 設計)、2つの同時 POST /commit は「同一 token に対する2つの syncCommitWindow 呼び出しが並行実行
+  // される」状況にそのまま対応する。D1 も非同期 I/O のため、各 await 境界(工程0〜1の SELECT/INSERT)が
+  // 真にインターリーブしうる。
+  it(
+    'シナリオ11: commit 並行呼び出し — 同一 token への2つの commit リクエストを同時に投げても' +
+      'imported history は重複しない(review round 1: task-16-report.md「Fix report」参照)',
+    async () => {
+      const { admin, pid, apiToken } = await setupProjectWithToken(ctx.app, 'proj-commit-race', 'sat-commit-race');
+
+      const started = await startSync(ctx.app, apiToken, pid, 'discovery-v1');
+      await chunkSync(ctx.app, apiToken, pid, started.sync_token, [
+        { external_ref: 'ext-race-1', fingerprint: 'fp-race-1', observed: obsFixture() },
+      ]);
+
+      const [r1, r2] = await Promise.all([
+        commitOnce(ctx.app, apiToken, pid, started.sync_token),
+        commitOnce(ctx.app, apiToken, pid, started.sync_token),
+      ]);
+      expect(r1.status).toBe(200);
+      expect(r2.status).toBe(200);
+      expect(r1.body).toEqual(r2.body); // 両応答は同一の最終状態を報告する(片方が即応でも中身は一致)
+
+      const id1 = r1.body.mappings.find((m: any) => m.external_ref === 'ext-race-1').test_case_id as string;
+      const history = await getHistory(ctx.app, admin, pid, id1);
+      expect(history.body.items.filter((h: any) => h.action === 'imported')).toHaveLength(1); // 重複無し
+
+      const list = await listTestCases(ctx.app, admin, pid);
+      expect(list.body.items.filter((i: any) => i.id === id1)).toHaveLength(1); // canonical も重複無し
+    },
+  );
 });

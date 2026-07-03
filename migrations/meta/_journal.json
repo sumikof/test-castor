@@ -15,6 +15,13 @@
       "when": 1783066327090,
       "tag": "0001_narrow_network",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1783075413782,
+      "tag": "0002_clammy_rage",
+      "breakpoints": true
     }
   ]
 }

@@ -69,4 +69,33 @@ describe('DDL(生成マイグレーション)', () => {
     db.exec(`INSERT INTO sync_seen (sync_token,external_ref) VALUES ('s1','ref2')`);
     db.exec(`INSERT INTO sync_seen (sync_token,external_ref) VALUES ('s2','ref1')`);
   });
+
+  // task-16 review round 1(sync commit の重複 imported 防止): uq_active_session と同じ部分一意索引の
+  // 手法で「test_case 1件につき action='imported' の履歴は厳密に1行」を DB 層で強制する
+  // (occ-concurrency.test.ts の並行テストが実際の重複シナリオを検証するのに対し、こちらは DDL 自体が
+  // 意図通りの制約になっていることを直接的に確認する)。
+  it(
+    "部分一意索引: test_case 1件につき action='imported' の履歴は1行のみ(uq_history_imported_per_tc)。" +
+      '他 action は何度でも共存できる',
+    () => {
+      insertBase();
+      db.exec(
+        `INSERT INTO test_cases (id,project_id,title,category,given,"when","then",status,ownership,created_origin,version,is_stale,drift,created_at)
+         VALUES ('t1','p1','x','normal','g','w','t','draft','machine','discovery-v1',1,0,0,1)`,
+      );
+      db.exec(`INSERT INTO test_case_history (id,test_case_id,actor,action,delta,created_at) VALUES ('h1','t1','token:tok','imported','{}',1)`);
+      expect(() => db.exec(
+        `INSERT INTO test_case_history (id,test_case_id,actor,action,delta,created_at) VALUES ('h2','t1','token:tok','imported','{}',2)`,
+      )).toThrow(/UNIQUE/);
+      // 別 action(created/updated 等)は部分索引の対象外のため何度でも共存できる
+      db.exec(`INSERT INTO test_case_history (id,test_case_id,actor,action,delta,created_at) VALUES ('h3','t1','user:u1','updated','{}',3)`);
+      db.exec(`INSERT INTO test_case_history (id,test_case_id,actor,action,delta,created_at) VALUES ('h4','t1','user:u1','updated','{}',4)`);
+      // 別 test_case なら imported も別途1行持てる
+      db.exec(
+        `INSERT INTO test_cases (id,project_id,title,category,given,"when","then",status,ownership,created_origin,version,is_stale,drift,created_at)
+         VALUES ('t2','p1','y','normal','g','w','t','draft','machine','discovery-v1',1,0,0,1)`,
+      );
+      db.exec(`INSERT INTO test_case_history (id,test_case_id,actor,action,delta,created_at) VALUES ('h5','t2','token:tok','imported','{}',5)`);
+    },
+  );
 });
