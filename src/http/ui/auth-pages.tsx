@@ -244,7 +244,12 @@ export const authPageRoutes = new Hono<AppEnv>()
     return c.html(<SetupPage csrf={csrf} />);
   })
 
-  .post('/setup', async (c) => {
+  // csrfProtect() は「actor が user のときのみ検証」なので、session actor が絶対に存在しない
+  // pre-auth ルート(setup/login)では恒久的に no-op(tests/unit/middleware-csrf.test.ts の
+  // 「requireAuth を経由していないルートで csrfProtect を呼んでも例外にならず next() する」で確認済み)。
+  // それでも明示的に挟むのは、「このルートは CSRF を検討済み・意図的に対象外」であることをコード上に
+  // 残すため(将来の変更でうっかり実挙動が変わっても安全側に倒れる防御的な一貫性)。
+  .post('/setup', csrfProtect(), async (c) => {
     const deps = c.get('deps');
     // 競合窓の既知の許容(api/setup.ts と同じ判断。countOrganizations() と setupOrg() の間に別リクエストが
     // 割り込む余地はあるが、初回デプロイ直後の単発操作という運用前提のため追加の排他機構は設けない)。
@@ -304,7 +309,7 @@ export const authPageRoutes = new Hono<AppEnv>()
     return c.html(<LoginPage csrf={csrf} flash={flash} />);
   })
 
-  .post('/login', async (c) => {
+  .post('/login', csrfProtect(), async (c) => {
     const deps = c.get('deps');
     const body = await c.req.parseBody();
     const email = String(body.email ?? '').trim();
