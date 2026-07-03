@@ -1,0 +1,454 @@
+/* public/app.css
+ * TMS の最小クラスレス寄り CSS(task-17-brief.md)。Task 17 時点では認証画面(S-01/S-02)+
+ * 共通レイアウト(グローバルヘッダー・プロジェクトコンテキストヘッダー・パンくず・トースト)を
+ * 満たす分だけで足りるが、Task 18-21 が同じ語彙(.btn/.field/.badge/.diff-row 等)をそのまま
+ * 再利用できるよう、一覧・詳細・ダイアログ・バッジ・Diff 表示に使うクラスもここで先に用意しておく。
+ * フレームワーク非依存の素の CSS(ビルドステップ無し)。
+ */
+
+:root {
+  --color-bg: #f5f6f8;
+  --color-surface: #ffffff;
+  --color-border: #d7dbe2;
+  --color-text: #1f2430;
+  --color-text-muted: #5b6472;
+  --color-primary: #2952cc;
+  --color-primary-hover: #1f3fa3;
+  --color-danger: #c0392b;
+  --color-danger-bg: #fdecea;
+  --color-success: #1e8e5a;
+  --color-success-bg: #e8f6ef;
+  --color-warn: #9a6b00;
+  --color-warn-bg: #fff4dd;
+  --radius: 6px;
+  --spacing-1: 4px;
+  --spacing-2: 8px;
+  --spacing-3: 16px;
+  --spacing-4: 24px;
+  --spacing-5: 32px;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", "Yu Gothic", Meiryo, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  font-family: var(--font-sans);
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  line-height: 1.6;
+  min-height: 100vh;
+}
+
+main {
+  display: block;
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: var(--spacing-4) var(--spacing-3);
+}
+
+h1 {
+  font-size: 1.5rem;
+  margin: 0 0 var(--spacing-3);
+}
+h2 {
+  font-size: 1.2rem;
+  margin: 0 0 var(--spacing-2);
+}
+
+a {
+  color: var(--color-primary);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+/* ---- グローバルヘッダー(docs/screens.md「共通レイアウト」) ---- */
+
+.global-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  padding: var(--spacing-2) var(--spacing-3);
+}
+.global-header-left {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-4);
+}
+.global-header-logo {
+  font-weight: 700;
+  font-size: 1.1rem;
+  color: var(--color-primary);
+}
+.global-nav {
+  display: flex;
+  gap: var(--spacing-3);
+}
+.global-header-right {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-3);
+}
+
+.user-menu {
+  position: relative;
+}
+.user-menu > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: var(--spacing-1) var(--spacing-2);
+  border-radius: var(--radius);
+}
+.user-menu > summary::-webkit-details-marker {
+  display: none;
+}
+.user-menu > summary:after {
+  content: " \25BE";
+}
+.user-menu[open] > summary {
+  background: var(--color-bg);
+}
+.user-menu-list {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 20;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  min-width: 160px;
+  padding: var(--spacing-1);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+}
+.user-menu-list a,
+.user-menu-list .link-button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: var(--spacing-2);
+  border-radius: var(--radius);
+  color: var(--color-text);
+}
+.user-menu-list a:hover,
+.user-menu-list .link-button:hover {
+  background: var(--color-bg);
+  text-decoration: none;
+}
+
+.link-button {
+  background: none;
+  border: none;
+  font: inherit;
+  cursor: pointer;
+  padding: 0;
+}
+
+/* ---- プロジェクトコンテキストヘッダー ---- */
+
+.project-context-header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-3);
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  padding: var(--spacing-2) var(--spacing-3);
+}
+.project-context-name {
+  font-weight: 600;
+}
+.project-context-nav {
+  display: flex;
+  gap: var(--spacing-3);
+  margin-left: auto;
+}
+
+/* ---- パンくず ---- */
+
+.breadcrumb {
+  padding: var(--spacing-2) var(--spacing-3);
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+}
+.breadcrumb-entry {
+  display: inline;
+}
+.breadcrumb-sep {
+  margin: 0 var(--spacing-1);
+  color: var(--color-text-muted);
+}
+
+/* ---- トースト / アラート ---- */
+
+.toast {
+  position: fixed;
+  top: var(--spacing-3);
+  right: var(--spacing-3);
+  z-index: 100;
+  padding: var(--spacing-2) var(--spacing-3);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  font-size: 0.95rem;
+}
+.toast-success {
+  background: var(--color-success-bg);
+  color: var(--color-success);
+}
+.toast-error {
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+}
+.toast-warn {
+  background: var(--color-warn-bg);
+  color: var(--color-warn);
+}
+
+.alert {
+  padding: var(--spacing-2) var(--spacing-3);
+  border-radius: var(--radius);
+  margin-bottom: var(--spacing-3);
+  font-size: 0.95rem;
+}
+.alert-error {
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+}
+.alert-success {
+  background: var(--color-success-bg);
+  color: var(--color-success);
+}
+.alert-warn {
+  background: var(--color-warn-bg);
+  color: var(--color-warn);
+}
+
+/* ---- 認証画面(S-01/S-02)カード ---- */
+
+.auth-card {
+  max-width: 420px;
+  margin: var(--spacing-5) auto;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--spacing-4);
+}
+.auth-card h1 {
+  text-align: center;
+}
+.login-logo {
+  display: flex;
+  justify-content: center;
+  margin-bottom: var(--spacing-3);
+}
+.hint {
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+}
+
+/* ---- フォーム ---- */
+
+form .field {
+  margin-bottom: var(--spacing-3);
+}
+label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: var(--spacing-1);
+  font-size: 0.9rem;
+}
+input,
+select,
+textarea {
+  width: 100%;
+  padding: var(--spacing-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font: inherit;
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+input:focus,
+select:focus,
+textarea:focus {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+.field-error {
+  color: var(--color-danger);
+  font-size: 0.85rem;
+  margin: var(--spacing-1) 0 0;
+  min-height: 1.1em;
+}
+.field-error:empty {
+  display: none;
+}
+
+/* ---- ボタン ---- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-2);
+  padding: var(--spacing-2) var(--spacing-3);
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  width: 100%;
+}
+.btn-primary {
+  background: var(--color-primary);
+  color: #fff;
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--color-primary-hover);
+}
+.btn-secondary {
+  background: var(--color-surface);
+  color: var(--color-text);
+  border-color: var(--color-border);
+}
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.btn.is-loading {
+  position: relative;
+  color: transparent;
+}
+.btn.is-loading::after {
+  content: "";
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.5);
+  border-top-color: #fff;
+  animation: btn-spin 0.6s linear infinite;
+}
+@keyframes btn-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---- バッジ(Task 19/20 のステータス・ownership・drift/stale 表示用のプレースホルダ) ---- */
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.4;
+  background: var(--color-bg);
+  color: var(--color-text-muted);
+}
+.badge-draft {
+  background: #eef0f4;
+  color: #5b6472;
+}
+.badge-approved {
+  background: var(--color-success-bg);
+  color: var(--color-success);
+}
+.badge-archived {
+  background: #eef0f4;
+  color: #8b93a1;
+}
+.badge-human {
+  background: #e6effe;
+  color: #2952cc;
+}
+.badge-machine {
+  background: #f1eefe;
+  color: #6a3fd6;
+}
+.badge-drift {
+  background: var(--color-warn-bg);
+  color: var(--color-warn);
+}
+.badge-stale {
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+}
+
+/* ---- テーブル(Task 18/19 の一覧向け) ---- */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--color-surface);
+}
+th,
+td {
+  text-align: left;
+  padding: var(--spacing-2) var(--spacing-2);
+  border-bottom: 1px solid var(--color-border);
+  font-size: 0.92rem;
+}
+th {
+  color: var(--color-text-muted);
+  font-weight: 600;
+}
+
+/* ---- Diff 表示(Task 20 の S-12 構造化 Diff 向けプレースホルダ) ---- */
+
+.diff-row {
+  display: flex;
+  gap: var(--spacing-2);
+  padding: var(--spacing-1) var(--spacing-2);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+}
+.diff-row.diff-add {
+  background: var(--color-success-bg);
+}
+.diff-row.diff-remove {
+  background: var(--color-danger-bg);
+}
+.diff-row.diff-unchanged {
+  color: var(--color-text-muted);
+}
+
+/* ---- ダイアログ(Task 18/21 が #dialog-root に描画する想定) ---- */
+
+#dialog-root:empty {
+  display: none;
+}
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 18, 26, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+.dialog {
+  background: var(--color-surface);
+  border-radius: var(--radius);
+  padding: var(--spacing-4);
+  max-width: 480px;
+  width: 100%;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+}
+
+/* ---- 空状態 ---- */
+
+.empty-state {
+  text-align: center;
+  color: var(--color-text-muted);
+  padding: var(--spacing-5) var(--spacing-3);
+}

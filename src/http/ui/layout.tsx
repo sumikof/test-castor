@@ -1,0 +1,207 @@
+// src/http/ui/layout.tsx
+// 共通レイアウト(docs/screens.md「共通レイアウト」): グローバルヘッダー・プロジェクトコンテキスト
+// ヘッダー・パンくず・トースト。task-17-brief.md Step 2 の骨子をそのまま実装する。
+//
+// フォーム強化スクリプト(FORM_ENHANCE_SCRIPT): S-01/S-02 の「状態バリエーション」表(初期状態=
+// 送信ボタン disabled・入力中=フォーカスアウトでバリデーションエラー表示・送信中=loading 状態)を
+// プログレッシブエンハンスメントとして満たす、依存ライブラリ無しの最小 JS。サーバー側の
+// 権威検証(auth-pages.tsx の validateSetupForm 等)と表示文言を一致させるため、メッセージ文字列は
+// input 要素の data-err-required/data-err-type/data-err-tooshort/data-err-match 属性として
+// サーバーが埋め込み、本スクリプトはそれを読むだけ(文言のハードコードをこちらに二重管理しない)。
+import type { Context } from 'hono';
+import type { AppEnv } from '../app';
+import type { UserRow, ProjectRow } from '../../storage/schema';
+import type { Flash } from './flash';
+
+const FORM_ENHANCE_SCRIPT = `
+(function () {
+  function fieldMessage(input) {
+    var v = input.validity;
+    if (v.valueMissing) return input.dataset.errRequired || '';
+    if (v.typeMismatch) return input.dataset.errType || '';
+    if (v.tooShort) return input.dataset.errTooshort || '';
+    var matchId = input.dataset.match;
+    if (matchId) {
+      var other = document.getElementById(matchId);
+      if (other && input.value && other.value !== input.value) return input.dataset.errMatch || '';
+    }
+    return '';
+  }
+  function errorEl(input) {
+    var id = input.getAttribute('aria-describedby');
+    return id ? document.getElementById(id) : null;
+  }
+  function paint(input) {
+    var el = errorEl(input);
+    if (!el) return true;
+    var msg = input.dataset.touched === '1' ? fieldMessage(input) : '';
+    el.textContent = msg;
+    return !msg;
+  }
+  function attach(form) {
+    var submit = form.querySelector('button[type=submit]');
+    var inputs = Array.prototype.slice.call(form.querySelectorAll('input'));
+    function refresh() {
+      var ok = form.checkValidity();
+      for (var i = 0; i < inputs.length; i++) {
+        var matchId = inputs[i].dataset.match;
+        if (matchId) {
+          var other = document.getElementById(matchId);
+          if (other && inputs[i].value && other.value !== inputs[i].value) ok = false;
+        }
+      }
+      if (submit) submit.disabled = !ok;
+    }
+    inputs.forEach(function (input) {
+      input.addEventListener('blur', function () {
+        input.dataset.touched = '1';
+        paint(input);
+      });
+      input.addEventListener('input', function () {
+        if (input.dataset.touched === '1') paint(input);
+        refresh();
+      });
+    });
+    form.addEventListener('submit', function (evt) {
+      var ok = true;
+      inputs.forEach(function (input) {
+        input.dataset.touched = '1';
+        if (!paint(input)) ok = false;
+      });
+      if (!ok) {
+        evt.preventDefault();
+        refresh();
+        return;
+      }
+      if (submit) {
+        submit.disabled = true;
+        submit.classList.add('is-loading');
+      }
+    });
+    refresh();
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('form[data-validate]'), attach);
+})();
+`;
+
+export interface BreadcrumbItem {
+  label: string;
+  href?: string;
+}
+
+export interface LayoutProps {
+  title: string;
+  user?: UserRow | null;
+  csrf?: string;
+  project?: ProjectRow | null;
+  breadcrumb?: Array<BreadcrumbItem>;
+  flash?: Flash | null;
+  children: unknown;
+}
+
+function GlobalHeader(props: { user: UserRow; csrf?: string }) {
+  const { user } = props;
+  const isAdmin = user.role === 'admin';
+  return (
+    <header class="global-header" data-testid="global-header">
+      <div class="global-header-left">
+        <a href="/projects" class="global-header-logo" data-testid="global-header-logo">TMS</a>
+        {/* MVP除外: ダッシュボード(S-05)は MVP 後のためナビに出さない(D-13-1)。 */}
+        <nav class="global-nav" data-testid="global-nav">
+          <a href="/projects" data-testid="nav-projects">プロジェクト</a>
+          {isAdmin && (
+            <a href="/admin/users" data-testid="nav-admin-users">ユーザー管理</a>
+          )}
+        </nav>
+      </div>
+      <div class="global-header-right">
+        <details class="user-menu" data-testid="user-menu">
+          <summary data-testid="user-menu-toggle">{user.displayName}</summary>
+          <div class="user-menu-list">
+            <a href="/profile" data-testid="user-menu-profile">プロフィール</a>
+            <form method="post" action="/logout" data-testid="logout-form">
+              <input type="hidden" name="_csrf" value={props.csrf ?? ''} />
+              <button type="submit" class="link-button" data-testid="user-menu-logout">ログアウト</button>
+            </form>
+          </div>
+        </details>
+      </div>
+    </header>
+  );
+}
+
+function ProjectContextHeader(props: { project: ProjectRow; user: UserRow }) {
+  const isAdmin = props.user.role === 'admin';
+  const pid = props.project.id;
+  return (
+    <div class="project-context-header" data-testid="project-context-header">
+      <a href="/projects" data-testid="project-context-back">← プロジェクト一覧</a>
+      <span class="project-context-name" data-testid="project-context-name">{props.project.name}</span>
+      <nav class="project-context-nav" data-testid="project-context-nav">
+        <a href={`/projects/${pid}/testcases`} data-testid="nav-testcases">テストケース</a>
+        {isAdmin && <a href={`/projects/${pid}/tokens`} data-testid="nav-tokens">API トークン</a>}
+        {isAdmin && <a href={`/projects/${pid}/settings`} data-testid="nav-settings">設定</a>}
+      </nav>
+    </div>
+  );
+}
+
+function Breadcrumb(props: { items: Array<BreadcrumbItem> }) {
+  return (
+    <nav class="breadcrumb" data-testid="breadcrumb" aria-label="breadcrumb">
+      {props.items.map((item, i) => (
+        <span class="breadcrumb-entry">
+          {i > 0 && <span class="breadcrumb-sep">{'>'}</span>}
+          {item.href ? (
+            <a href={item.href} data-testid={`breadcrumb-item-${i}`}>{item.label}</a>
+          ) : (
+            <span data-testid={`breadcrumb-item-${i}`}>{item.label}</span>
+          )}
+        </span>
+      ))}
+    </nav>
+  );
+}
+
+/** docs/screens.md「共通レイアウト」骨子(task-17-brief.md Step 2)。 */
+export const Layout = (p: LayoutProps) => (
+  <html lang="ja">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>{p.title} - TMS</title>
+      <link rel="stylesheet" href="/app.css" />
+      <script src="/htmx.min.js" defer></script>
+    </head>
+    <body hx-headers={p.csrf ? JSON.stringify({ 'X-CSRF-Token': p.csrf }) : undefined}>
+      {p.user && <GlobalHeader user={p.user} csrf={p.csrf} />}
+      {p.project && p.user && <ProjectContextHeader project={p.project} user={p.user} />}
+      {p.breadcrumb && <Breadcrumb items={p.breadcrumb} />}
+      {p.flash && (
+        <div class={`toast toast-${p.flash.kind}`} data-testid="toast" role="status">
+          {p.flash.text}
+        </div>
+      )}
+      <main>{p.children}</main>
+      <div id="dialog-root"></div>
+      <script dangerouslySetInnerHTML={{ __html: FORM_ENHANCE_SCRIPT }}></script>
+    </body>
+  </html>
+);
+
+/**
+ * requirePageAuth({minRole}) が権限不足(403)時に描画するページ。docs/screens/ 配下に汎用エラー
+ * ページの仕様は無い(各 S-xx は認可済み利用者の遷移のみを記述する)ため、data-testid は本実装で
+ * 採番した(page-403-title/page-403-message。GC-8 の趣旨に沿い、内部的な一貫性のために付与)。
+ */
+export function renderForbiddenPage(c: Context<AppEnv>, user: UserRow | null) {
+  return c.html(
+    <Layout title="アクセス拒否" user={user}>
+      <div class="auth-card">
+        <h1 data-testid="page-403-title">アクセスできません</h1>
+        <p data-testid="page-403-message">このページを表示する権限がありません。</p>
+      </div>
+    </Layout>,
+    403,
+  );
+}

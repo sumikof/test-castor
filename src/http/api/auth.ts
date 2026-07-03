@@ -3,7 +3,10 @@
 // - login: 認証不要。(email, ip) キーの loginLimiter で D-14(5失敗/15分)のブルートフォース防御を行う。
 //   事前チェックは consume:false(正しいパスワードの試行はカウントに含めない)、失敗時のみ consume する
 //   非対称消費が肝。成功時はセッション固定攻撃対策として必ず新規セッションIDを発行する
-//   (auth-security.md「不変条件」)。
+//   (auth-security.md「不変条件」)。ログイン本体のロジックは task-17 で
+//   src/domain/services/auth-service.ts の loginUser() へ抽出済み。UI ルート(src/http/ui/auth-pages.tsx)
+//   も同じ関数を呼ぶ(内部 HTTP 往復はしない=承認済みアプローチ A)。ここでは
+//   JSON レスポンス組み立て・Cookie 発行・エラーコードへのマッピングのみを担う。
 // - logout/me/password: セッション必須。logout/password は状態変更のため CSRF 必須(D-09)。
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
@@ -16,60 +19,31 @@ import { csrfProtect, SESSION_COOKIE, CSRF_COOKIE, COOKIE_ATTRS } from '../middl
 import { orgScopeOf } from '../middleware/scope';
 import { loginInput, changePasswordInput } from '../../schemas/api';
 import { toUserJson } from './serializers';
+import { loginUser } from '../../domain/services/auth-service';
 
 export const authRoutes = new Hono<AppEnv>()
   .post('/login', zValidator('json', loginInput, zodHook), async (c) => {
     const deps = c.get('deps');
     const { email, password } = c.req.valid('json');
     const ip = c.req.header('cf-connecting-ip') ?? 'local';
-    const key = `login:${email}:${ip}`;
 
-    // 事前チェック(consume:false): 既にブロック中なら検証すら行わず429(D-14)。
-    const gate = await deps.loginLimiter.limit(key, { consume: false });
-    if (!gate.allowed) {
-      c.header('Retry-After', String(gate.retryAfterSec ?? 60));
-      throw new AppError('RATE_LIMITED', 429, 'too many attempts', undefined, true);
-    }
-
-    const user = await deps.storage.findUserForLogin(email);
-    // 未知 email(user=null)・パスワード未設定(passwordHash=null)でも、既知 email+誤りパスワードと
-    // 同じコストの PBKDF2 を必ず1回実行させる(verifyPassword に null をそのまま渡す)。ここで
-    // 「該当なしなら検証すらしない」早期分岐を作ると、応答時間差から email の存在有無が漏れる
-    // (タイミングサイドチャネルによるユーザー列挙。auth-security.md「タイミング攻撃対策」)。
-    const result = await deps.auth.verifyPassword(password, user?.passwordHash ?? null);
-
-    if (!user || !result.ok) {
-      // 失敗した試行のみ consume する(正しいパスワードの試行はカウントしない非対称レート制限)。
-      await deps.loginLimiter.limit(key);
-      // D-11: 認証失敗監査は構造化 JSON ログのみ(D1 監査テーブルは持たない)。
-      console.warn(JSON.stringify({ event: 'auth_failure', email, ip, at: deps.now() }));
+    const result = await loginUser(deps, { email, password, ip });
+    if (!result.ok) {
+      if (result.reason === 'rate_limited') {
+        c.header('Retry-After', String(result.retryAfterSec));
+        throw new AppError('RATE_LIMITED', 429, 'too many attempts', undefined, true);
+      }
       // 未知 email / 誤パスワードを区別しない統一メッセージ(存在有無を漏らさない)。
       throw new AppError('UNAUTHORIZED', 401, 'invalid email or password');
     }
 
-    const scope = { organizationId: user.organizationId };
-    if (result.needsRehash) {
-      // 透過再ハッシュ: 旧イテレーション数の PHC を検出したら現行設定で再ハッシュして保存する
-      // (auth-security.md「透過再ハッシュ」)。
-      await deps.storage.setUserPassword(scope, user.id, await deps.auth.hashPassword(password), deps.now());
-    }
-    await deps.storage.touchLastLogin(scope, user.id, deps.now()); // D-05: last_login_at 更新
-
-    // セッション固定攻撃対策: ログイン成功時は必ず新規セッションIDを発行する(auth-security.md「不変条件」)。
-    const sid = deps.auth.newSessionId();
-    await deps.storage.createSession({
-      id: sid,
-      userId: user.id,
-      expiresAt: deps.now() + deps.config.sessionTtlMs,
-      createdAt: deps.now(),
-    });
-    setCookie(c, SESSION_COOKIE, await deps.auth.signSessionId(sid), COOKIE_ATTRS);
+    setCookie(c, SESSION_COOKIE, await deps.auth.signSessionId(result.sessionId), COOKIE_ATTRS);
     setCookie(c, CSRF_COOKIE, deps.auth.newCsrfToken(), COOKIE_ATTRS);
 
     // apis/auth.md の login レスポンスは user.{id,email,display_name,role} のみ(created_at 等は
     // 含まない)。toUserJson は以後のタスク向けの完全形なので、ここでは契約に合わせて絞り込む。
-    const { created_at: _createdAt, updated_at: _updatedAt, last_login_at: _lastLoginAt, ...loginUser } = toUserJson(user);
-    return c.json({ user: loginUser });
+    const { created_at: _createdAt, updated_at: _updatedAt, last_login_at: _lastLoginAt, ...loginUserJson } = toUserJson(result.user);
+    return c.json({ user: loginUserJson });
   })
 
   .post('/logout', requireAuth({ modes: ['session'] }), csrfProtect(), async (c) => {

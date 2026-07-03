@@ -1,6 +1,8 @@
 // src/http/api/setup.ts
 // 初回セットアップ API(docs/apis/setup.md)。認証不要。Organization が0件のときのみ実行可能で、
 // 組織 + 管理者ユーザーを単一操作(Storage.setupOrganization、内部で単一トランザクション)で作成する。
+// セットアップ本体のロジックは task-17 で src/domain/services/auth-service.ts の setupOrg() へ抽出済み。
+// UI ルート(src/http/ui/auth-pages.tsx の GET|POST /setup)も同じ関数を呼ぶ(承認済みアプローチ A)。
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import type { AppEnv } from '../app';
@@ -8,6 +10,7 @@ import { AppError } from '../errors';
 import { zodHook } from '../middleware/error';
 import { setupInput } from '../../schemas/api';
 import { toOrganizationJson, toUserJson } from './serializers';
+import { setupOrg } from '../../domain/services/auth-service';
 
 export const setupRoutes = new Hono<AppEnv>().post('/', zValidator('json', setupInput, zodHook), async (c) => {
   const deps = c.get('deps');
@@ -20,13 +23,11 @@ export const setupRoutes = new Hono<AppEnv>().post('/', zValidator('json', setup
   const existing = await deps.storage.countOrganizations();
   if (existing > 0) throw new AppError('SETUP_ALREADY_COMPLETE', 409, 'setup already complete');
 
-  const adminPasswordHash = await deps.auth.hashPassword(input.admin_password);
-  const { organization, user } = await deps.storage.setupOrganization({
+  const { organization, user } = await setupOrg(deps, {
     orgName: input.organization_name,
     adminEmail: input.admin_email,
-    adminPasswordHash,
+    adminPassword: input.admin_password,
     adminDisplayName: input.admin_display_name,
-    now: deps.now(),
   });
 
   // apis/setup.md のレスポンス仕様は user.{id,email,display_name,role,created_at} の5フィールドのみ

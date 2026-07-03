@@ -18,6 +18,7 @@ import { projectsRoutes } from './api/projects';
 import { tokensRoutes } from './api/tokens';
 import { testCasesRoutes } from './api/testcases';
 import { syncRoutes } from './api/sync';
+import { authPageRoutes } from './ui/auth-pages';
 
 export interface AppDeps {
   storage: Storage;
@@ -70,6 +71,12 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   app.route('/api/v1/projects', tokensRoutes);
   app.route('/api/v1/projects', testCasesRoutes);
   app.route('/api/v1/projects', syncRoutes);
+
+  // SSR UI ルート(task-17-brief.md「UI 基盤 + 認証画面」)。GET / の振り分け(D-13-1/8)・S-01 セットアップ・
+  // S-02 ログイン・ログアウトを登録する。/api/v1/* とパスが重複しないため登録順は影響しないが、
+  // 「API の 404 フォールバックより前」という規約に合わせ、onError/notFound の直前に置く。
+  // Task 18 以降がここに projects-pages 等を追記していく。
+  app.route('/', authPageRoutes);
 
   app.onError(errorMiddleware);
   app.notFound(() => {
