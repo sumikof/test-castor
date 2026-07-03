@@ -33,6 +33,11 @@ export interface Storage {
   listUsers(scope: OrgScope): Promise<UserRow[]>;
   createUser(scope: OrgScope, p: CreateUserParams): Promise<UserRow | 'email_taken'>;
   updateUser(scope: OrgScope, id: string, patch: { role?: Role; displayName?: string }, now: number): Promise<UserRow | null>;
+  /**
+   * Atomically change a user's role, refusing to demote the last admin (guard is in the
+   * UPDATE's WHERE so it's race-free on the single-writer DB).
+   */
+  setUserRoleGuarded(scope: OrgScope, id: string, newRole: Role, now: number): Promise<'ok' | 'blocked_last_admin' | 'not_found'>;
   countAdmins(scope: OrgScope): Promise<number>;
   setUserPassword(scope: OrgScope, userId: string, passwordHash: string, now: number): Promise<void>;
   touchLastLogin(scope: OrgScope, userId: string, now: number): Promise<void>;

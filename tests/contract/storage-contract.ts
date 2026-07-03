@@ -49,6 +49,36 @@ export function runStorageContract(name: string, factory: () => Promise<Contract
       expect(await ctx.storage.countAdmins(scope)).toBe(2);
     });
 
+    it('users: setUserRoleGuarded は最後の admin への降格のみ atomic に拒否する(D-13-7, TOCTOUレース修正)', async () => {
+      const admin = (await ctx.storage.findUserForLogin('admin@example.com'))!;
+      const second = await ctx.storage.createUser(scope, {
+        email: 'second@example.com', passwordHash: 'h', displayName: 'Second', role: 'editor', now,
+      });
+      const secondId = (second as any).id as string;
+
+      // 昇格(editor→admin)は admin 人数に関わらず常に許可される
+      expect(await ctx.storage.setUserRoleGuarded(scope, secondId, 'admin', now + 1)).toBe('ok');
+      expect(await ctx.storage.countAdmins(scope)).toBe(2);
+
+      // admin が2人いる状態での降格は許可される(1人になる)
+      expect(await ctx.storage.setUserRoleGuarded(scope, admin.id, 'editor', now + 2)).toBe('ok');
+      expect(await ctx.storage.countAdmins(scope)).toBe(1);
+      expect((await ctx.storage.getUser(scope, admin.id))?.role).toBe('editor');
+
+      // 残る唯一の admin(secondId)を降格しようとすると拒否され、ロールは変化しない
+      expect(await ctx.storage.setUserRoleGuarded(scope, secondId, 'editor', now + 3)).toBe('blocked_last_admin');
+      expect((await ctx.storage.getUser(scope, secondId))?.role).toBe('admin'); // 変更されていない
+      expect(await ctx.storage.countAdmins(scope)).toBe(1);
+
+      // admin→admin のラテラル(no-op)は「降格」ではないため拒否されない
+      expect(await ctx.storage.setUserRoleGuarded(scope, secondId, 'admin', now + 4)).toBe('ok');
+
+      // 存在しない id は not_found
+      expect(await ctx.storage.setUserRoleGuarded(
+        scope, '00000000-0000-0000-0000-000000000000', 'admin', now + 5,
+      )).toBe('not_found');
+    });
+
     it('users: getUserById は org 不問で id のみ一致すれば取得できる(authn 専用)。未知 id は null', async () => {
       const admin = await ctx.storage.findUserForLogin('admin@example.com');
       const got = await ctx.storage.getUserById(admin!.id);

@@ -85,6 +85,35 @@ export function createDrizzleStorage(driver: StorageDriver): Storage {
         .where(and(eq(users.id, id), eq(users.organizationId, scope.organizationId))).run();
       return getUser(scope, id);
     },
+    async setUserRoleGuarded(scope, id, newRole, now) {
+      // D-13-7 の TOCTOU レース修正: admin 人数チェックを UPDATE の WHERE 句内に埋め込むことで、
+      // 「読んでから書く」の2ラウンドトリップを単一の原子的な UPDATE に潰す(SQLite/D1/libSQL は
+      // いずれも single-writer のため、この1文は他の書き込みと絶対にインターリーブしない)。
+      // WHERE がマッチするのは (a) 新ロールが admin(昇格・ラテラルは無条件許可) (b) 対象が現在
+      // admin でない(降格に該当しない) (c) 組織の admin 総数が2以上(対象を除いても1人以上残る)
+      // のいずれか。3アダプタ共通のポータブルな subset(スカラー相関サブクエリ、LIMIT不使用)。
+      await db.run(sql`
+        UPDATE users
+        SET role = ${newRole}, updated_at = ${now}
+        WHERE id = ${id}
+          AND organization_id = ${scope.organizationId}
+          AND (
+            ${newRole} = 'admin'
+            OR role != 'admin'
+            OR (
+              SELECT COUNT(*) FROM users u2
+              WHERE u2.organization_id = ${scope.organizationId} AND u2.role = 'admin'
+            ) > 1
+          )
+      `);
+      // drizzle の .run() 結果形は better-sqlite3(同期 .changes)/ D1(meta.changes)/ libSQL
+      // (rowsAffected)で不揃い(このファイルの他メソッドも同様に統一アクセサへは依存していない。
+      // 例: revokeApiToken は無条件 UPDATE 後に再SELECTして結果を判定する)。ここでも同じ流儀で、
+      // UPDATE 後に再取得したロールが要求どおりかどうかで結果を判定する。
+      const after = await getUser(scope, id);
+      if (!after) return 'not_found';
+      return after.role === newRole ? 'ok' : 'blocked_last_admin';
+    },
     async countAdmins(scope) {
       const [r] = await db.select({ n: count() }).from(users)
         .where(and(eq(users.organizationId, scope.organizationId), eq(users.role, 'admin')));

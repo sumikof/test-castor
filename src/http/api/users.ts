@@ -5,9 +5,11 @@
 //
 // - PATCH: role が実際に変化した場合のみ、対象ユーザーの全セッションを無効化する(exceptなし。
 //   apis/users.md「副作用・業務ルール」)。display_name のみの変更では無効化しない。
-//   「最後の admin」保護(D-13-7, スペック D-13-7): 対象が現在 admin かつ新ロールが admin 以外かつ
-//   組織の admin 総数が1以下なら、更新前に 422 VALIDATION_FAILED で拒否する(自己降格・他者降格を
-//   区別しない。「admin が1人しかいない状態でその1人を降格しようとしている」という条件のみで判定できる)。
+//   「最後の admin」保護(D-13-7): storage.setUserRoleGuarded が単一の条件付き UPDATE(WHERE 句内で
+//   admin 人数を判定)で atomic に強制する。「countAdmins で読んでから updateUser で書く」という
+//   2ラウンドトリップの事前チェックは TOCTOU レースになる(同時に2件の降格 PATCH が飛ぶと、両方とも
+//   admin 人数=2 を読んでガードを通過し、両方コミットして admin が0人になり得る)ため使わない。
+//   'blocked_last_admin' → 422 VALIDATION_FAILED(自己降格・他者降格を区別しない)。'not_found' → 404。
 // - reset-password: 対象ユーザーの全セッションを無効化する(exceptなし。PATCH /auth/password と異なり
 //   自セッションの例外はない — reset-password は「管理者が他者に対して行う操作」が前提のため)。
 //   パスワードポリシー(D-06)は resetPasswordInput(共有 Zod スキーマ)が担保する。
@@ -29,6 +31,7 @@ import { csrfProtect } from '../middleware/csrf';
 import { orgScopeOf } from '../middleware/scope';
 import { createUserInput, patchUserInput, resetPasswordInput } from '../../schemas/api';
 import { toUserJson } from './serializers';
+import type { Role } from '../../schemas/enums';
 
 const adminOnly = requireAuth({ modes: ['session'], minRole: 'admin' });
 
@@ -77,22 +80,29 @@ export const usersRoutes = new Hono<AppEnv>()
     if (!current) throw new AppError('NOT_FOUND', 404, 'not found');
 
     const roleChanging = patch.role !== undefined && patch.role !== current.role;
-    if (
-      roleChanging
-      && current.role === 'admin'
-      && patch.role !== 'admin'
-      && (await deps.storage.countAdmins(scope)) <= 1
-    ) {
-      // D-13-7: 組織の admin が0人になる role 変更は拒否する(自己降格・他者降格を区別しない)。
-      throw new AppError('VALIDATION_FAILED', 422, 'cannot demote the last admin');
-    }
 
-    const updated = await deps.storage.updateUser(scope, id, { role: patch.role, displayName: patch.display_name }, deps.now());
-    if (!updated) throw new AppError('NOT_FOUND', 404, 'not found');
-
+    let updated = current;
     if (roleChanging) {
+      // D-13-7: atomic guard(TOCTOUレース修正)。countAdmins による事前チェックは撤去済み
+      // — この呼び出し自体が「読んでから書く」を単一 UPDATE に潰した実際の強制ロジック。
+      const guardResult = await deps.storage.setUserRoleGuarded(scope, id, patch.role as Role, deps.now());
+      if (guardResult === 'not_found') throw new AppError('NOT_FOUND', 404, 'not found');
+      if (guardResult === 'blocked_last_admin') {
+        throw new AppError('VALIDATION_FAILED', 422, 'cannot demote the last admin');
+      }
+      // guardResult === 'ok': role は既に更新済み。display_name も指定されていれば併せて適用する。
+      const after = patch.display_name !== undefined
+        ? await deps.storage.updateUser(scope, id, { displayName: patch.display_name }, deps.now())
+        : await deps.storage.getUser(scope, id);
+      if (!after) throw new AppError('NOT_FOUND', 404, 'not found');
+      updated = after;
+
       // ロール変更時のみ対象ユーザーの全セッションを無効化する(exceptなし。apis/users.md 副作用)。
       await deps.storage.deleteUserSessions(id);
+    } else {
+      const after = await deps.storage.updateUser(scope, id, { displayName: patch.display_name }, deps.now());
+      if (!after) throw new AppError('NOT_FOUND', 404, 'not found');
+      updated = after;
     }
 
     return c.json(toUserJson(updated));
