@@ -8,6 +8,12 @@
 // 権威検証(auth-pages.tsx の validateSetupForm 等)と表示文言を一致させるため、メッセージ文字列は
 // input 要素の data-err-required/data-err-type/data-err-tooshort/data-err-match 属性として
 // サーバーが埋め込み、本スクリプトはそれを読むだけ(文言のハードコードをこちらに二重管理しない)。
+//
+// レビュー指摘の修正(no-JS 送信不能バグ): SSR HTML の送信ボタンは disabled をハードコードしない
+// (auth-pages.tsx 側。JS が無い/失敗した利用者でもサーバー側検証を頼りに送信できる必要がある)。
+// 「初期状態=disabled」という UX 自体は JS 利用者向けには維持する必要があるため、その適用は
+// このスクリプト(attach 関数)が読み込み時に行う。つまり disabled 状態は完全に JS 側の追加仕様
+// (purely additive)になり、JS が無ければ最初からボタンは有効なまま。
 import type { Context } from 'hono';
 import type { AppEnv } from '../app';
 import type { UserRow, ProjectRow } from '../../storage/schema';
@@ -41,6 +47,10 @@ const FORM_ENHANCE_SCRIPT = `
   function attach(form) {
     var submit = form.querySelector('button[type=submit]');
     var inputs = Array.prototype.slice.call(form.querySelectorAll('input'));
+    // SSR HTML はこの button に disabled を含めない(no-JS 送信可能にするため)。JS が実行できた
+    // クライアントに限り、ここで明示的に初期 disabled を適用する。直後の refresh() が現在値に基づき
+    // 即座に再計算するため、実質的な見た目は「initial disabled → toggle on validity」のまま変わらない。
+    if (submit) submit.disabled = true;
     function refresh() {
       var ok = form.checkValidity();
       for (var i = 0; i < inputs.length; i++) {
@@ -193,10 +203,15 @@ export const Layout = (p: LayoutProps) => (
  * requirePageAuth({minRole}) が権限不足(403)時に描画するページ。docs/screens/ 配下に汎用エラー
  * ページの仕様は無い(各 S-xx は認可済み利用者の遷移のみを記述する)ため、data-testid は本実装で
  * 採番した(page-403-title/page-403-message。GC-8 の趣旨に沿い、内部的な一貫性のために付与)。
+ *
+ * csrf(レビュー指摘の修正): 呼び出し元(requirePageAuth)が ensureCsrfCookie(c) で取得した実トークンを
+ * 渡す。渡さないと Layout → GlobalHeader のログアウトフォームが `_csrf=""` を埋め込み、403 画面から
+ * ログアウトしようとすると csrfProtect() に弾かれて再度 403 になる(この画面は必ず認証済み user を
+ * 伴うため、GlobalHeader は常に描画され、ログアウトフォームは常に存在する)。
  */
-export function renderForbiddenPage(c: Context<AppEnv>, user: UserRow | null) {
+export function renderForbiddenPage(c: Context<AppEnv>, user: UserRow | null, csrf?: string) {
   return c.html(
-    <Layout title="アクセス拒否" user={user}>
+    <Layout title="アクセス拒否" user={user} csrf={csrf}>
       <div class="auth-card">
         <h1 data-testid="page-403-title">アクセスできません</h1>
         <p data-testid="page-403-message">このページを表示する権限がありません。</p>

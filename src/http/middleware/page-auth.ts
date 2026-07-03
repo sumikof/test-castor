@@ -52,7 +52,13 @@ export function requirePageAuth(opts: { minRole?: Role } = {}): MiddlewareHandle
 
     const { user, sessionId } = session;
     if (opts.minRole && ROLE_RANK[user.role as Role] < ROLE_RANK[opts.minRole]) {
-      return renderForbiddenPage(c, user);
+      // レビュー指摘の修正: csrf 無しで renderForbiddenPage を呼ぶと GlobalHeader のログアウト
+      // フォームに `_csrf=""` が埋め込まれ、403 画面からのログアウトが必ず csrfProtect() に弾かれる
+      // (この 403 は認証済み user 前提のため GlobalHeader は必ず描画される)。ensureCsrfCookie は
+      // 既存 Cookie があればそれを再利用するだけなので、ここで呼んでも通常の GET フォームページと
+      // 同じ契約(値を変えない)を壊さない。
+      const csrf = await ensureCsrfCookie(c);
+      return renderForbiddenPage(c, user, csrf);
     }
     c.set('actor', { kind: 'user', user, sessionId });
     await next();

@@ -102,8 +102,12 @@ describe('SSR: UI 基盤 + 認証画面(S-01/S-02)', () => {
       ]) {
         expect(hasTag(html, testid)).toBe(true);
       }
-      // 初期状態(全フィールド空): 送信ボタンは disabled(S-01「状態バリエーション」)。
-      expect(findTag(html, 'setup-submit')).toContain('disabled');
+      // no-JS プログレッシブエンハンスメント(レビュー指摘の修正): SSR HTML の送信ボタンは disabled を
+      // 持たない(サーバー側検証が権威であり、JS 無し/失敗でも送信できる必要がある)。S-01「状態
+      // バリエーション」表の「初期状態=disabled」は JS 利用者向けの見た目であり、layout.tsx の
+      // FORM_ENHANCE_SCRIPT が読み込み時に適用する(tests/unit/ui-layout.test.ts 側では検証しないが、
+      // 同スクリプトの attach() が `submit.disabled = true` を実行することは目視・レビュー済み)。
+      expect(findTag(html, 'setup-submit')).not.toMatch(/\bdisabled\b/);
       // 共通レイアウトの資産配線(app.css / htmx.min.js)。
       expect(html).toContain('href="/app.css"');
       expect(html).toContain('src="/htmx.min.js"');
@@ -163,6 +167,22 @@ describe('SSR: UI 基盤 + 認証画面(S-01/S-02)', () => {
       expect(await ctx.storage.countOrganizations()).toBe(0);
     });
 
+    // validateSetupForm の未検証分岐を埋める(レビュー指摘。パスワード確認が空文字の場合は
+    // 不一致(passwordMismatch)ではなく passwordConfirmRequired を返す専用分岐)。
+    it('パスワード確認が空文字 → 200 + setup-admin-password-confirm-error に「確認用パスワードを入力してください」', async () => {
+      const res = await ctx.app.request('/setup', formReq({
+        organization_name: DEFAULT_SETUP_BODY.organization_name,
+        admin_email: DEFAULT_SETUP_BODY.admin_email,
+        admin_password: DEFAULT_SETUP_BODY.admin_password,
+        admin_password_confirm: '',
+        admin_display_name: DEFAULT_SETUP_BODY.admin_display_name,
+      }));
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(tagText(html, 'setup-admin-password-confirm-error')).toBe('確認用パスワードを入力してください');
+      expect(await ctx.storage.countOrganizations()).toBe(0);
+    });
+
     it('パスワードが8文字未満 → 200 + setup-admin-password-error に「パスワードは8文字以上で入力してください」', async () => {
       const res = await ctx.app.request('/setup', formReq({
         organization_name: DEFAULT_SETUP_BODY.organization_name,
@@ -192,6 +212,22 @@ describe('SSR: UI 基盤 + 認証画面(S-01/S-02)', () => {
       expect(await ctx.storage.countOrganizations()).toBe(0);
     });
 
+    // validateSetupForm の未検証分岐を埋める(レビュー指摘。空文字判定を通過した後の
+    // nameSchema(LIMITS.name=100)超過分岐は orgNameRequired ではなく orgNameTooLong を返す)。
+    it('組織名が100文字超 → 200 + setup-org-name-error に「組織名は100文字以内で入力してください」', async () => {
+      const res = await ctx.app.request('/setup', formReq({
+        organization_name: 'a'.repeat(101),
+        admin_email: DEFAULT_SETUP_BODY.admin_email,
+        admin_password: DEFAULT_SETUP_BODY.admin_password,
+        admin_password_confirm: DEFAULT_SETUP_BODY.admin_password,
+        admin_display_name: DEFAULT_SETUP_BODY.admin_display_name,
+      }));
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(tagText(html, 'setup-org-name-error')).toBe('組織名は100文字以内で入力してください');
+      expect(await ctx.storage.countOrganizations()).toBe(0);
+    });
+
     it('管理者メールが不正な形式 → 200 + setup-admin-email-error に「有効なメールアドレスを入力してください」', async () => {
       const res = await ctx.app.request('/setup', formReq({
         organization_name: DEFAULT_SETUP_BODY.organization_name,
@@ -217,6 +253,22 @@ describe('SSR: UI 基盤 + 認証画面(S-01/S-02)', () => {
       expect(res.status).toBe(200);
       const html = await res.text();
       expect(tagText(html, 'setup-admin-display-name-error')).toBe('表示名を入力してください');
+      expect(await ctx.storage.countOrganizations()).toBe(0);
+    });
+
+    // validateSetupForm の未検証分岐を埋める(レビュー指摘。組織名と同じ nameSchema/LIMITS.name=100 を
+    // 使うため、表示名側にも独立した超過分岐(displayNameTooLong)が存在する)。
+    it('表示名が100文字超 → 200 + setup-admin-display-name-error に「表示名は100文字以内で入力してください」', async () => {
+      const res = await ctx.app.request('/setup', formReq({
+        organization_name: DEFAULT_SETUP_BODY.organization_name,
+        admin_email: DEFAULT_SETUP_BODY.admin_email,
+        admin_password: DEFAULT_SETUP_BODY.admin_password,
+        admin_password_confirm: DEFAULT_SETUP_BODY.admin_password,
+        admin_display_name: 'a'.repeat(101),
+      }));
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(tagText(html, 'setup-admin-display-name-error')).toBe('表示名は100文字以内で入力してください');
       expect(await ctx.storage.countOrganizations()).toBe(0);
     });
 
@@ -260,7 +312,8 @@ describe('SSR: UI 基盤 + 認証画面(S-01/S-02)', () => {
       for (const testid of ['login-logo', 'login-email', 'login-password', 'login-submit', 'login-forgot-password']) {
         expect(hasTag(html, testid)).toBe(true);
       }
-      expect(findTag(html, 'login-submit')).toContain('disabled');
+      // no-JS プログレッシブエンハンスメント: setup-submit と同じ理由で SSR は disabled を持たない。
+      expect(findTag(html, 'login-submit')).not.toMatch(/\bdisabled\b/);
 
       // D-13-2: 「パスワードを忘れた場合」はリンクではなくヒント文言(未実装の S-03 に導線を張らない)。
       const forgotTag = findTag(html, 'login-forgot-password');
@@ -289,6 +342,44 @@ describe('SSR: UI 基盤 + 認証画面(S-01/S-02)', () => {
       const res = await ctx.app.request('/login?flash=setup_complete');
       const html = await res.text();
       expect(tagText(html, 'toast')).toBe('セットアップが完了しました。ログインしてください');
+    });
+  });
+
+  // レビュー指摘の修正の regression lock: setup/login の送信ボタンは SSR HTML 側で disabled に
+  // なっていないこと(no-JS クライアントでも送信できること)を明示的に固定する。GET /setup・GET /login
+  // 各 describe 内の GC-8 テストでも同じ属性を確認しているが、あちらは「data-testid 一式が揃っているか」
+  // の smoke test であり、このテストは「progressive enhancement 修正そのもの」を主張として独立させる。
+  describe('no-JS プログレッシブエンハンスメント(送信ボタンは SSR で disabled にならない)', () => {
+    it('GET /setup: setup-submit ボタンに disabled 属性が無い(no-JS でも送信可能)', async () => {
+      const res = await ctx.app.request('/setup');
+      const html = await res.text();
+      const tag = findTag(html, 'setup-submit');
+      expect(tag).not.toMatch(/\bdisabled\b/);
+      expect(tag).toContain('type="submit"');
+    });
+
+    it('GET /login: login-submit ボタンに disabled 属性が無い(no-JS でも送信可能)', async () => {
+      await setupAndLogin(ctx.app);
+      const res = await ctx.app.request('/login');
+      const html = await res.text();
+      const tag = findTag(html, 'login-submit');
+      expect(tag).not.toMatch(/\bdisabled\b/);
+      expect(tag).toContain('type="submit"');
+    });
+
+    it('POST /setup のバリデーションエラー再描画でも setup-submit に disabled 属性が付かない', async () => {
+      // 422相当の再描画パス(SetupPage の再呼び出し)でも disabled がハードコードされていないことを
+      // 確認する(GET だけでなく POST の再描画分岐にも同じ修正が効いていることの確認)。
+      const res = await ctx.app.request('/setup', formReq({
+        organization_name: '',
+        admin_email: DEFAULT_SETUP_BODY.admin_email,
+        admin_password: DEFAULT_SETUP_BODY.admin_password,
+        admin_password_confirm: DEFAULT_SETUP_BODY.admin_password,
+        admin_display_name: DEFAULT_SETUP_BODY.admin_display_name,
+      }));
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(findTag(html, 'setup-submit')).not.toMatch(/\bdisabled\b/);
     });
   });
 
@@ -405,6 +496,32 @@ describe('SSR: UI 基盤 + 認証画面(S-01/S-02)', () => {
       const html = await res.text();
       expect(tagText(html, 'page-403-title')).toBe('アクセスできません');
       expect(hasTag(html, 'page-403-message')).toBe(true);
+    });
+
+    // レビュー指摘の修正: renderForbiddenPage に csrf を渡さないと GlobalHeader のログアウトフォームが
+    // `_csrf=""` を埋め込み、403 ページからのログアウトが必ず csrfProtect() に弾かれ再び403になる
+    // (要 Important 修正)。ここでは (1) 埋め込み値が空でないこと、(2) 実際の csrf Cookie の値と
+    // 一致すること、(3) その値で実際に /logout が成功すること、の3点で修正を固定する。
+    it('ロール不足の403ページ: ログアウトフォームの _csrf が空でなく csrf Cookie の値と一致し、そのトークンでログアウトできる', async () => {
+      ctx.app.get('/__test/admin-only-csrf', requirePageAuth({ minRole: 'admin' }), (c) => c.text('ok'));
+      const admin = await setupAndLogin(ctx.app);
+      const viewer = await createViewerAndLogin(ctx, admin);
+
+      const res = await ctx.app.request('/__test/admin-only-csrf', { headers: { Cookie: cookieHeader(viewer.jar) } });
+      expect(res.status).toBe(403);
+      const html = await res.text();
+
+      const hiddenMatch = html.match(/<input type="hidden" name="_csrf" value="([^"]*)"/);
+      expect(hiddenMatch?.[1]).toBeTruthy();
+      expect(hiddenMatch?.[1]).toBe(viewer.csrf);
+
+      // 埋め込みバグが再発すれば(空文字に戻れば)このログアウトは403で失敗する。
+      const logoutRes = await ctx.app.request('/logout', {
+        method: 'POST',
+        headers: { Cookie: cookieHeader(viewer.jar), 'x-csrf-token': hiddenMatch![1]! },
+      });
+      expect(logoutRes.status).toBe(303);
+      expect(logoutRes.headers.get('location')).toBe('/login');
     });
 
     it('十分なロール(admin)→ next() が呼ばれ、実際のハンドラが実行される', async () => {

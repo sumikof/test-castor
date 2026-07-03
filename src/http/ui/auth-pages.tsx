@@ -167,7 +167,12 @@ function SetupPage(props: SetupPageProps) {
             error={e.admin_display_name} errRequired={MSG.displayNameRequired}
           />
 
-          <button type="submit" class="btn btn-primary" data-testid="setup-submit" disabled>セットアップ開始</button>
+          {/* progressive enhancement(レビュー指摘の修正): disabled をここでハードコードすると
+              JS 無効/失敗時に永久に送信不能になる(サーバー側 validateSetupForm が権威検証を担うため
+              no-JS でも安全)。JS 側(layout.tsx の FORM_ENHANCE_SCRIPT)が読み込み時に disabled を
+              適用し、以後は入力に応じてトグルする(JS 利用者には従来通り「初期状態=disabled」の
+              見た目を維持)。 */}
+          <button type="submit" class="btn btn-primary" data-testid="setup-submit">セットアップ開始</button>
         </form>
       </div>
     </Layout>
@@ -215,7 +220,9 @@ function LoginPage(props: LoginPageProps) {
           {/* D-13-2: 「パスワードを忘れた場合」リンクは非表示。ヒント文言のみ(未実装の S-03 へのリンクにしない)。 */}
           <p class="hint" data-testid="login-forgot-password">パスワードを忘れた場合は管理者にお問い合わせください</p>
 
-          <button type="submit" class="btn btn-primary" data-testid="login-submit" disabled>ログイン</button>
+          {/* progressive enhancement: setup-submit と同じ理由で SSR は disabled をハードコードしない
+              (no-JS クライアントも送信できる。JS 側が初期 disabled を適用する)。 */}
+          <button type="submit" class="btn btn-primary" data-testid="login-submit">ログイン</button>
         </form>
       </div>
     </Layout>
