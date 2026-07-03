@@ -6,12 +6,13 @@ import { migrationStatements } from '../migrations-loader';
 
 export function createBetterSqlite3Storage(path = ':memory:') {
   const sqlite = new Database(path);
-  sqlite.pragma('journal_mode = WAL');
   sqlite.pragma('foreign_keys = ON');
   // operations.md §4.3: auto_vacuum はテーブル作成前(空DB時)に設定
+  // auto_vacuum は最初のコミット前に設定必須(WAL切替がpage 1をコミットするため先に発行するとno-op化する)
   if ((sqlite.pragma('page_count', { simple: true }) as number) <= 1) {
     sqlite.pragma('auto_vacuum = INCREMENTAL');
   }
+  sqlite.pragma('journal_mode = WAL');
   for (const stmt of migrationStatements()) sqlite.exec(stmt);
   const db = drizzle(sqlite);
   const storage = createDrizzleStorage({
