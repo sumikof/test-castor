@@ -117,3 +117,70 @@ describe('auth: signed session id (HMAC-SHA256, keyId ローテーション)', (
       .toThrow();
   });
 });
+
+describe('auth: 認証バイパス回帰(keyId が Object.prototype own-property 名の場合)', () => {
+  // 修正前の脆弱性: `signingKeys[keyId]` は keyId が "__proto__" 等の Object.prototype own-property 名の
+  // 場合、bracket アクセスが prototype チェーンを辿って truthy な非 undefined 値(Object.prototype 自身や
+  // Object コンストラクタ等)を返してしまい、「未知 keyId → null」のガード(`secret === undefined`)を
+  // すり抜けていた。その値は TextEncoder.encode() に渡る際に暗黙の ToString 変換を受け(例えば
+  // Object.prototype なら固定文字列 "[object Object]" に)、攻撃者が実鍵を一切知らずとも HMAC 鍵として
+  // 悪用し、偽造トークンを検証に通すことができた。
+  //
+  // ここでは (a) 5つの prototype own-property 名それぞれについて、任意の(実際には無関係な)署名でも
+  // 常に null になること、(b) __proto__ については実際に脆弱性が使う鍵 "[object Object]" で正しく
+  // HMAC-SHA256 署名した「本物の偽造トークン」でも null になること(＝当該脆弱性の攻撃経路が
+  // 塞がれていることの直接証明)を確認する。
+
+  /** ソースの hmacSha256 + bytesToBase64Url と同じ手順で HMAC-SHA256 を計算し base64url 化する。
+   *  攻撃者が実secretを知らずとも計算できる "[object Object]" 鍵での偽造署名を作るために使う。 */
+  async function hmacSha256Base64Url(secret: string, message: string): Promise<string> {
+    const key = await crypto.subtle.importKey(
+      'raw',
+      new TextEncoder().encode(secret),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign'],
+    );
+    const sigBuf = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(message));
+    const bytes = new Uint8Array(sigBuf);
+    const binary = Array.from(bytes, (b) => String.fromCharCode(b)).join('');
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+
+  const PROTOTYPE_KEY_IDS = ['__proto__', 'constructor', 'valueOf', 'hasOwnProperty', 'toString'];
+  // 43文字ちょうどの妥当な base64url 形式のダミー署名。値そのものが正しい署名かどうかは無関係で、
+  // 「keyId が prototype own-property 名なら、どんな sig であろうと絶対に検証を通らない」
+  // (Object.hasOwn ガードがシグネチャ検証より先に落とすため)ことを示すのが目的。
+  const PLAUSIBLE_DUMMY_SIG = 'A'.repeat(43);
+
+  it.each(PROTOTYPE_KEY_IDS)(
+    'keyId="%s"(Object.prototype own-property名)は signingKeys={k1:...} に存在しないため常に null',
+    async (protoKeyId) => {
+      const auth = createWebcryptoAuth({ signingKeys: { k1: 'secret1' }, activeKeyId: 'k1', pbkdf2Iterations: 1000 });
+      const someId = auth.newSessionId();
+      const forged = `${protoKeyId}.${someId}.${PLAUSIBLE_DUMMY_SIG}`;
+      expect(await auth.verifySignedSessionId(forged)).toBeNull();
+    },
+  );
+
+  it('実攻撃再現: keyId="__proto__" を "[object Object]" 鍵で正しくHMAC署名した偽造トークンは検証を通らない', async () => {
+    // 修正前の脆弱性下では signingKeys['__proto__'] が Object.prototype を返し、
+    // TextEncoder.encode() に渡る際に String(Object.prototype) === "[object Object]" に暗黙変換されて
+    // HMAC鍵として使われてしまっていた(secret は本来 signingKeys.k1 = 'secret1' であり、攻撃者はこれを
+    // 知らない)。ここでは実鍵を一切使わず、公開されている固定文字列 "[object Object]" だけを鍵として
+    // 正しい HMAC-SHA256 署名を計算し、実際の攻撃と全く同じ手順で偽造トークンを作って検証にかける。
+    const auth = createWebcryptoAuth({ signingKeys: { k1: 'secret1' }, activeKeyId: 'k1', pbkdf2Iterations: 1000 });
+    const someId = auth.newSessionId();
+    const forgedSig = await hmacSha256Base64Url('[object Object]', someId);
+    const forged = `__proto__.${someId}.${forgedSig}`;
+    expect(await auth.verifySignedSessionId(forged)).toBeNull();
+  });
+
+  it('signingKeys が空でも activeKeyId="__proto__" は own property ではないため createWebcryptoAuth は構築時に例外', () => {
+    // Object.hasOwn 導入前は `{}['__proto__']`(= Object.prototype、truthy)が
+    // `!== undefined` を満たしてしまい、この危険な構成(署名に使う実体のない鍵で活性化)が
+    // 構築時検証をすり抜けていた。
+    expect(() => createWebcryptoAuth({ signingKeys: {}, activeKeyId: '__proto__', pbkdf2Iterations: 1000 }))
+      .toThrow();
+  });
+});

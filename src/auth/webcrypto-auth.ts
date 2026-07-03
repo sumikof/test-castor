@@ -18,11 +18,16 @@ export interface WebcryptoAuthConfig {
   pbkdf2Iterations?: number;
 }
 
-/** activeKeyId が signingKeys に存在しない構成は、実行時エラーの温床になる前に構築時点で弾く。 */
+/**
+ * activeKeyId が signingKeys に存在しない構成は、実行時エラーの温床になる前に構築時点で弾く。
+ * Object.hasOwn を使う(単純な `signingKeys[activeKeyId] === undefined` だと、signingKeys が
+ * "constructor" 等の inherited property しか持たない/空オブジェクトの場合に prototype チェーン経由の
+ * truthy な値を拾って検証をすり抜けてしまう。session-sign.ts の verifySignedSessionId 冒頭コメント参照)。
+ */
 export function createWebcryptoAuth(cfg: WebcryptoAuthConfig): Auth {
   const { signingKeys, activeKeyId } = cfg;
   const pbkdf2Iterations = cfg.pbkdf2Iterations ?? DEFAULT_PBKDF2_ITERATIONS;
-  if (signingKeys[activeKeyId] === undefined) {
+  if (!Object.hasOwn(signingKeys, activeKeyId)) {
     throw new Error(`createWebcryptoAuth: activeKeyId "${activeKeyId}" is not present in signingKeys`);
   }
 
