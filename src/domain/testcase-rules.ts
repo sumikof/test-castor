@@ -52,7 +52,7 @@ export type PatchInput = {
 };
 
 /** JSON 値としての深い等価性。キー順序は無視、配列要素順序は区別する。 */
-function jsonDeepEqual(a: unknown, b: unknown): boolean {
+export function jsonDeepEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (a === null || b === null) return false;
   if (typeof a !== typeof b) return false;

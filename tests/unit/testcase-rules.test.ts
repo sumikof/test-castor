@@ -115,6 +115,16 @@ describe('computeHumanPatch', () => {
     expect(result.ownershipTransition).toBe(false); // 既に human
   });
 
+  it('既に null のフィールドへ null を再送する PATCH は no-op(target/parameters/metadata が全て null の行に target:null を再送しても偽陽性の変更にならない。jsonDeepEqual(null,null)===true の回帰防止)', () => {
+    const row = makeRow({ ownership: 'machine', target: null, parameters: null, metadata: null });
+    const result = computeHumanPatch(row, { target: null });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unreachable');
+    expect(result.changes).toEqual({});
+    expect(result.ownershipTransition).toBe(false); // machine 所有でも実変更なしなら遷移しない
+    expect(result.statusChange).toBeNull();
+  });
+
   it('status 不正遷移(archived→approved)は invalid_transition を返す', () => {
     const row = makeRow({ status: 'archived', ownership: 'human' });
     const result = computeHumanPatch(row, { status: 'approved' });
