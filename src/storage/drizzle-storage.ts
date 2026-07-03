@@ -77,6 +77,18 @@ function toBatches<T>(items: T[], size: number): T[][] {
   return out;
 }
 
+// review round 1(CRITICAL D1 bind overflow)。syncAppendObservations の①committed-JOIN フェンス SELECT
+// (下記参照)は inArray(refs) で ref 1件につき1バインドを消費し、これに projectId/origin/session.token の
+// 3バインドが加わるため合計 `refs.length + 3` になる。refs はチャンク全体の重複排除済み ref
+// (MAX_CHUNK_SIZE=500 まで許容)であり、97件を超えると D1 の「1文あたり bind ≤100」制約
+// (sync-protocol.md「D1 制約」)を超過し、実行時に "D1_ERROR: too many SQL variables" が発生する
+// (MAX_CHUNK_SIZE=500 の範囲内で普通に起こりうる。例: 既存テストスイートの初回一括同期)。
+// 書き込み側(観測 INSERT/sync_seen INSERT)は toBatches 済みだったが、この読み取りクエリだけは
+// 分割されていなかった(review round 1 で検出)。上限97に余裕を持たせ、90 ref/クエリに分割する
+// (90+3=93 ≤ 100)。refs はバッチ間で重複しないため、各バッチを独立に問い合わせて同じ
+// latestFingerprintByRef へマージするだけで、単一クエリ版と同一の結果になる。
+const FENCE_REFS_BATCH_SIZE = 90;
+
 export function createDrizzleStorage(driver: StorageDriver): Storage {
   const { db } = driver;
 
@@ -677,22 +689,28 @@ export function createDrizzleStorage(driver: StorageDriver): Storage {
       const refs = [...new Set(obs.map((o) => o.externalRef))];
 
       // ① committed-JOIN フェンス(sync-protocol.md「committed-JOIN フェンス」): committed セッション由来
-      // または当セッション自身の観測のみを対象に、ref ごとの最新 fingerprint を求める(1クエリ)。
-      const latestRows = await db
-        .select({ externalRef: testCaseObservations.externalRef, fingerprint: testCaseObservations.fingerprint })
-        .from(testCaseObservations)
-        .innerJoin(syncSessions, eq(syncSessions.token, testCaseObservations.syncToken))
-        .where(and(
-          eq(testCaseObservations.projectId, pid),
-          eq(testCaseObservations.origin, session.origin),
-          inArray(testCaseObservations.externalRef, refs),
-          sql`(${syncSessions.status} = 'committed' OR ${syncSessions.token} = ${session.token})`,
-        ))
-        .orderBy(desc(testCaseObservations.createdAt), desc(testCaseObservations.id));
-
+      // または当セッション自身の観測のみを対象に、ref ごとの最新 fingerprint を求める。
+      // review round 1(CRITICAL D1 bind overflow): refs を1つの IN() に丸ごとバインドすると
+      // D1 の bind ≤100 制約を超えうるため(FENCE_REFS_BATCH_SIZE 定義部のコメント参照)、
+      // FENCE_REFS_BATCH_SIZE 件ずつに分割してクエリを分け、各バッチの結果を1つの
+      // latestFingerprintByRef にマージする(committed-JOIN フェンス述語そのものは変更しない)。
       const latestFingerprintByRef = new Map<string, string>();
-      for (const r of latestRows) {
-        if (!latestFingerprintByRef.has(r.externalRef)) latestFingerprintByRef.set(r.externalRef, r.fingerprint);
+      for (const refBatch of toBatches(refs, FENCE_REFS_BATCH_SIZE)) {
+        const latestRows = await db
+          .select({ externalRef: testCaseObservations.externalRef, fingerprint: testCaseObservations.fingerprint })
+          .from(testCaseObservations)
+          .innerJoin(syncSessions, eq(syncSessions.token, testCaseObservations.syncToken))
+          .where(and(
+            eq(testCaseObservations.projectId, pid),
+            eq(testCaseObservations.origin, session.origin),
+            inArray(testCaseObservations.externalRef, refBatch),
+            sql`(${syncSessions.status} = 'committed' OR ${syncSessions.token} = ${session.token})`,
+          ))
+          .orderBy(desc(testCaseObservations.createdAt), desc(testCaseObservations.id));
+
+        for (const r of latestRows) {
+          if (!latestFingerprintByRef.has(r.externalRef)) latestFingerprintByRef.set(r.externalRef, r.fingerprint);
+        }
       }
 
       // ② fingerprint が異なる/初出の ref のみ観測 INSERT 候補にする(容量設計の根幹 = 変化点のみ記録)。

@@ -12,6 +12,7 @@
 // 完走すること(sync_seen への INSERT は観測 INSERT と同一メソッド内で常に実行されるため、後者が
 // 正しく完走していれば前者も実行されている)を根拠にする。タスク報告にも明記する。
 import { describe, it, expect, beforeEach } from 'vitest';
+import { env } from 'cloudflare:test';
 import type { Hono } from 'hono';
 import type { AppEnv } from '../../src/http/app';
 import { makeTestApp, wipe, cookieHeader, setupAndLogin, createProject, issueToken, FIXED_NOW, type TestApp } from './helpers';
@@ -396,6 +397,100 @@ describe('統合: 同期プロトコル start/chunk(task-15-brief.md)', () => {
         expect(blocked.headers.get('Retry-After')).toBe('60'); // windowMs=60_000・クロック未進行のため ceil(60000/1000)
       },
       30_000,
+    );
+
+    // review round 1(CRITICAL D1 bind overflow)。syncAppendObservations の①committed-JOINフェンス SELECT
+    // は inArray(refs) で ref 1件につき1バインドを消費するため、修正前は projectId/origin/session.token の
+    // 3バインドと合わせて `refs.length + 3` バインドになり、distinct external_ref が97件を超える chunk で
+    // D1 の「1文あたり bind ≤100」制約(sync-protocol.md「D1 制約」)を実行時に超過していた
+    // (MAX_CHUNK_SIZE=500 の範囲内で普通に起こりうる。例: 既存テストスイートの初回一括同期)。
+    // ここでは実 D1(miniflare。本ファイルは workers pool 実行)に対して、上限97を安全に超え、かつ
+    // FENCE_REFS_BATCH_SIZE=90 での複数バッチ分割・マージも exercise する250件の distinct external_ref を
+    // 送る。修正前のコードに対してはこのテストが "D1_ERROR: too many SQL variables" で落ちることを
+    // 確認済み(タスク報告参照)。
+    it(
+      'review round 1(CRITICAL D1 bind overflow): distinct external_ref が250件(>100、複数バッチにまたがる)の' +
+        'chunkでも committed-JOINフェンス SELECT が D1 の bind上限(≤100)を超えず 200 で全件処理される',
+      async () => {
+        const { pid, apiToken } = await setupProjectWithToken(ctx, 'large-chunk-project', 'large-chunk-sat');
+        const started = await startSync(ctx.app, apiToken, pid, 'discovery-v1');
+
+        // MAX_CHUNK_SIZE=500 の範囲内(422にならない)。初回一括同期を模す既存観測ゼロの状態のため、
+        // ①のフェンス SELECT は(バッチ分割されていても)全 ref で0件ヒットし、全件 inserted になるはず。
+        const N = 250;
+        const observations = Array.from({ length: N }, (_, i) => ({
+          external_ref: `ext-large-${i}`,
+          fingerprint: `fp-large-${i}`,
+          observed: OBS_FIXTURE,
+        }));
+
+        const res = await ctx.app.request(chunkUrl(pid, started.sync_token), bearerReq('POST', apiToken, { observations }));
+        expect(res.status).toBe(200);
+        const body = await res.json<any>();
+        expect(body.accepted).toBe(N);
+        expect(body.received).toHaveLength(N);
+
+        const outcomeByRef = new Map<string, string>(body.received.map((r: any) => [r.external_ref, r.outcome]));
+        expect(outcomeByRef.size).toBe(N); // 全件が received に含まれる(欠落なし)
+        for (let i = 0; i < N; i++) {
+          expect(outcomeByRef.get(`ext-large-${i}`)).toBe('inserted');
+        }
+      },
+    );
+
+    // 重要(sync_seen 出現台帳の全件記録): sync_seen は「chunkで受信した全 ref(変化点の有無を問わず)」を
+    // 記録する出現台帳であり、Task 16 の commit 工程3/4(stale 判定)はこれを根拠にする(sync-protocol.md
+    // 「変化点のみ記録」との緊張関係を解決する設計。task-15-brief.md「⚠ 設計上の重要ノート」参照)。
+    // 実装は正しい(seenRows は変化点フィルタ前の全 ref から作られる)が、これまで sync_seen の中身を
+    // 直接検証するテストが無く、「変化なし(duplicate)ref を sync_seen へ書く」経路が changed-only に
+    // 回帰しても検知できなかった。ここでは同一セッション内で fingerprint 不変の再送(duplicate。観測行は
+    // 増えない)を作り、Task 15 時点では読み出し API が無いため env.DB を直接クエリして sync_seen の中身を
+    // 検証する。
+    it(
+      '重要: 同一セッション内で fingerprint 不変の再送(duplicate)refも、新規(inserted)refと同様に' +
+        ' sync_seen へ記録される(env.DB を直接クエリして検証)',
+      async () => {
+        const { pid, apiToken } = await setupProjectWithToken(ctx, 'sync-seen-project', 'sync-seen-sat');
+        const started = await startSync(ctx.app, apiToken, pid, 'discovery-v1');
+
+        // 1st chunk: refA@fp1 を新規投入(inserted)。
+        const first = await ctx.app.request(
+          chunkUrl(pid, started.sync_token),
+          bearerReq('POST', apiToken, {
+            observations: [{ external_ref: 'ext-seen-a', fingerprint: 'fp-seen-1', observed: OBS_FIXTURE }],
+          }),
+        );
+        expect(first.status).toBe(200);
+        expect(await first.json<any>()).toEqual({ accepted: 1, received: [{ external_ref: 'ext-seen-a', outcome: 'inserted' }] });
+
+        // 2nd chunk(同一セッション): refA@fp1 を再送(fingerprint 不変 → duplicate。観測行は増えない) +
+        // refC@fp2 を新規投入(inserted)。
+        const second = await ctx.app.request(
+          chunkUrl(pid, started.sync_token),
+          bearerReq('POST', apiToken, {
+            observations: [
+              { external_ref: 'ext-seen-a', fingerprint: 'fp-seen-1', observed: OBS_FIXTURE },
+              { external_ref: 'ext-seen-c', fingerprint: 'fp-seen-2', observed: OBS_FIXTURE },
+            ],
+          }),
+        );
+        expect(second.status).toBe(200);
+        const secondBody = await second.json<any>();
+        expect(secondBody.accepted).toBe(2);
+        expect(secondBody.received).toEqual(expect.arrayContaining([
+          { external_ref: 'ext-seen-a', outcome: 'duplicate' },
+          { external_ref: 'ext-seen-c', outcome: 'inserted' },
+        ]));
+
+        // duplicate outcome の ext-seen-a が sync_seen に欠落していれば「append-all」不変条件が破れている
+        // (changed-only refへの回帰の検知手段)。sync_seen はこのセッション専用(sync_token でスコープ)。
+        const seenRows = await env.DB
+          .prepare('SELECT external_ref FROM sync_seen WHERE sync_token = ?')
+          .bind(started.sync_token)
+          .all<{ external_ref: string }>();
+        const seenRefs = (seenRows.results ?? []).map((r) => r.external_ref).sort();
+        expect(seenRefs).toEqual(['ext-seen-a', 'ext-seen-c']); // refA はちょうど1回(uq_seen)・refC も記録されている
+      },
     );
   });
 });
