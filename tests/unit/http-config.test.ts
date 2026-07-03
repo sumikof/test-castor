@@ -1,7 +1,8 @@
 // tests/unit/http-config.test.ts
 // loadConfig: env(Record<string,string|undefined>) → AppConfig。既定値は D-08(セッション7日)・
 // D-14(レートリミット具体値)・observation/identity 90日保持に一致すること、SESSION_SIGNING_KEYS
-// 未設定時のdevフォールバック+console.warn、JSON パース結果からの activeKeyId 導出を検証する。
+// 未設定時のdevフォールバック+console.warn、SESSION_ACTIVE_KEY_ID による明示的な activeKeyId 選択
+// (単一鍵は省略可・複数鍵は必須・存在しない鍵IDや数字のみの鍵ID・非文字列の秘密鍵は例外)を検証する。
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { loadConfig } from '../../src/http/config';
 import { createWebcryptoAuth } from '../../src/auth/webcrypto-auth';
@@ -45,11 +46,42 @@ describe('http/config: loadConfig', () => {
     expect(cfg.activeKeyId).toBe('k1');
   });
 
-  it('SESSION_SIGNING_KEYS: 複数鍵ローテーション時は最後に列挙された鍵が activeKeyId になる(新鍵発行・旧鍵検証猶予)', () => {
+  it('SESSION_SIGNING_KEYS: 複数鍵時は SESSION_ACTIVE_KEY_ID で指定した鍵が activeKeyId になる(新鍵発行・旧鍵検証猶予)', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const cfg = loadConfig({ SESSION_SIGNING_KEYS: '{"k1":"secret1","k2":"secret2"}' });
+    const cfg = loadConfig({
+      SESSION_SIGNING_KEYS: '{"k1":"secret1","k2":"secret2"}',
+      SESSION_ACTIVE_KEY_ID: 'k2',
+    });
     expect(cfg.signingKeys).toEqual({ k1: 'secret1', k2: 'secret2' });
     expect(cfg.activeKeyId).toBe('k2');
+  });
+
+  it('SESSION_ACTIVE_KEY_ID が signingKeys に存在しない鍵IDを指す場合: 例外を投げる', () => {
+    expect(() =>
+      loadConfig({
+        SESSION_SIGNING_KEYS: '{"k1":"secret1","k2":"secret2"}',
+        SESSION_ACTIVE_KEY_ID: 'k9',
+      }),
+    ).toThrow('SESSION_ACTIVE_KEY_ID');
+  });
+
+  it('複数鍵 かつ SESSION_ACTIVE_KEY_ID 未設定: 例外を投げる(曖昧な自動選択を拒否する)', () => {
+    expect(() => loadConfig({ SESSION_SIGNING_KEYS: '{"k1":"secret1","k2":"secret2"}' })).toThrow(
+      'SESSION_ACTIVE_KEY_ID must be set when multiple signing keys are configured',
+    );
+  });
+
+  it('鍵IDが数字のみ(例 "1")の場合: 例外を投げる(JSのオブジェクトキー数値昇順列挙の罠を回避)', () => {
+    expect(() => loadConfig({ SESSION_SIGNING_KEYS: '{"1":"secret1"}' })).toThrow();
+  });
+
+  it('複数鍵の一部が数字のみの鍵IDの場合も例外を投げる(SESSION_ACTIVE_KEY_ID指定の有無に関わらず)', () => {
+    expect(() =>
+      loadConfig({
+        SESSION_SIGNING_KEYS: '{"k1":"secret1","2":"secret2"}',
+        SESSION_ACTIVE_KEY_ID: 'k1',
+      }),
+    ).toThrow();
   });
 
   it('loadConfig の出力を createWebcryptoAuth にそのまま渡せる(dev フォールバック・複数鍵どちらも構築時エラーにならない)', () => {
@@ -57,7 +89,10 @@ describe('http/config: loadConfig', () => {
     const devCfg = loadConfig({});
     expect(() => createWebcryptoAuth({ ...devCfg })).not.toThrow();
 
-    const multiCfg = loadConfig({ SESSION_SIGNING_KEYS: '{"k1":"secret1","k2":"secret2"}' });
+    const multiCfg = loadConfig({
+      SESSION_SIGNING_KEYS: '{"k1":"secret1","k2":"secret2"}',
+      SESSION_ACTIVE_KEY_ID: 'k2',
+    });
     const auth = createWebcryptoAuth({ ...multiCfg, pbkdf2Iterations: 1000 });
     expect(auth).toBeTruthy();
   });
@@ -118,5 +153,9 @@ describe('http/config: loadConfig', () => {
     expect(() => loadConfig({ SESSION_SIGNING_KEYS: '["k1"]' })).toThrow();
     expect(() => loadConfig({ SESSION_SIGNING_KEYS: '42' })).toThrow();
     expect(() => loadConfig({ SESSION_SIGNING_KEYS: 'null' })).toThrow();
+  });
+
+  it('SESSION_SIGNING_KEYS の値が文字列でない場合(例 {"k1":42})は例外を投げる', () => {
+    expect(() => loadConfig({ SESSION_SIGNING_KEYS: '{"k1":42}' })).toThrow();
   });
 });

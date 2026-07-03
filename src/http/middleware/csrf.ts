@@ -35,6 +35,7 @@ export function csrfProtect(): MiddlewareHandler<AppEnv> {
           submitted = typeof field === 'string' ? field : undefined;
         }
       }
+      // double-submit トークンは秘密鍵ではないため定数時間比較は不要(D-09)。署名/パスワードの定数時間比較とは意図的に異なる。
       if (!cookie || !submitted || cookie !== submitted) {
         throw new AppError('FORBIDDEN', 403, 'csrf token mismatch');
       }
