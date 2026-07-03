@@ -58,6 +58,10 @@ export function createDrizzleStorage(driver: StorageDriver): Storage {
       const [u] = await db.select().from(users).where(eq(users.email, email)).limit(1);
       return u ?? null;
     },
+    async getUserById(id) {
+      const [u] = await db.select().from(users).where(eq(users.id, id));
+      return u ?? null;
+    },
     getUser,
     async listUsers(scope) {
       return db.select().from(users).where(eq(users.organizationId, scope.organizationId)).orderBy(users.createdAt);

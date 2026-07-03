@@ -22,6 +22,13 @@ export interface Storage {
   // --- users ---
   /** ログイン用。email はorg内一意(MVPは単一org運用)。global 検索で LIMIT 1 */
   findUserForLogin(email: string): Promise<UserRow | null>;
+  /**
+   * authn ミドルウェア専用・scope なし。APIハンドラでは使用禁止(GC-5 の唯一の例外)。
+   * セッション→ユーザー解決の時点では org がまだ判明していない(Session 行は user_id のみ持つ)ため、
+   * org スコープを要求できない。ここで得た UserRow から org を確定させた後は、以後の全ハンドラ処理が
+   * 通常の scope 付きメソッド(getUser 等)を経由すること。
+   */
+  getUserById(id: string): Promise<UserRow | null>;
   getUser(scope: OrgScope, id: string): Promise<UserRow | null>;
   listUsers(scope: OrgScope): Promise<UserRow[]>;
   createUser(scope: OrgScope, p: CreateUserParams): Promise<UserRow | 'email_taken'>;

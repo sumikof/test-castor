@@ -49,6 +49,14 @@ export function runStorageContract(name: string, factory: () => Promise<Contract
       expect(await ctx.storage.countAdmins(scope)).toBe(2);
     });
 
+    it('users: getUserById は org 不問で id のみ一致すれば取得できる(authn 専用)。未知 id は null', async () => {
+      const admin = await ctx.storage.findUserForLogin('admin@example.com');
+      const got = await ctx.storage.getUserById(admin!.id);
+      expect(got?.id).toBe(admin!.id);
+      expect(got?.email).toBe('admin@example.com');
+      expect(await ctx.storage.getUserById('00000000-0000-0000-0000-000000000000')).toBeNull();
+    });
+
     it('users: 他 org のユーザーは scope 越しに見えない(テナント境界)', async () => {
       const other = await ctx.storage.setupOrganization({
         orgName: 'org2', adminEmail: 'a2@example.com', adminPasswordHash: 'h', adminDisplayName: 'A2', now,
