@@ -21,6 +21,8 @@ import { syncRoutes } from './api/sync';
 import { authPageRoutes } from './ui/auth-pages';
 import { projectPageRoutes } from './ui/projects-pages';
 import { testCasePageRoutes } from './ui/testcase-list';
+import { testCaseFormRoutes } from './ui/testcase-form';
+import { testCaseDetailRoutes } from './ui/testcase-detail';
 
 export interface AppDeps {
   storage: Storage;
@@ -83,6 +85,12 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   app.route('/', projectPageRoutes);
   // S-08 テストケース一覧 / S-15 一括操作確認ダイアログ(task-19-brief.md)。
   app.route('/', testCasePageRoutes);
+  // S-09 テストケース作成(task-20-brief.md)。static パス `/testcases/new` を detail の `/testcases/:id`
+  // より前に登録する(Hono のルータは静的パスを優先するため実害は無いはずだが、可読性のため明示的に
+  // form ルートを detail ルートより先に app.route() する)。
+  app.route('/', testCaseFormRoutes);
+  // S-10 詳細 + S-11 編集 + S-12 Diff / S-13 Gherkin / S-14 履歴 / Identity タブ(task-20-brief.md)。
+  app.route('/', testCaseDetailRoutes);
 
   app.onError(errorMiddleware);
   app.notFound(() => {

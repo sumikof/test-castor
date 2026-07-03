@@ -648,3 +648,162 @@ th {
 .bulk-confirm-warnings li {
   margin: var(--spacing-1) 0;
 }
+
+/* ---- S-09/S-11(Task 20): テストケース作成・編集フォーム ---- */
+
+.section {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--spacing-3);
+  margin-bottom: var(--spacing-3);
+  background: var(--color-surface);
+}
+.section h3 {
+  margin-top: 0;
+}
+.param-table {
+  margin-bottom: var(--spacing-2);
+}
+.param-table input {
+  width: 100%;
+}
+.tag-editor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-2);
+}
+.tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-1);
+}
+.tag-chip button {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  padding: 0;
+}
+.tag-input-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+}
+.tag-input-row input {
+  width: auto;
+}
+form .dialog-actions .btn {
+  width: auto;
+}
+
+/* ---- S-10/S-11/S-12/S-13/S-14(Task 20): テストケース詳細 + タブ ---- */
+
+.testcase-header {
+  margin-bottom: var(--spacing-3);
+}
+.testcase-status-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  margin: var(--spacing-2) 0;
+}
+.status-select-form {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-1);
+}
+.status-select-form select {
+  width: auto;
+}
+.status-select-submit {
+  width: auto;
+}
+.testcase-actions {
+  display: flex;
+  gap: var(--spacing-2);
+  margin-bottom: var(--spacing-2);
+}
+.testcase-actions .btn {
+  width: auto;
+}
+.field-label {
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+.multiline {
+  white-space: pre-wrap;
+}
+
+.tab-bar {
+  display: flex;
+  gap: var(--spacing-1);
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: var(--spacing-3);
+}
+.tab-bar .tab {
+  padding: var(--spacing-2) var(--spacing-3);
+  color: var(--color-text-muted);
+  border-bottom: 2px solid transparent;
+}
+.tab-bar .tab:hover {
+  text-decoration: none;
+  color: var(--color-text);
+}
+.tab-bar .tab-active {
+  color: var(--color-primary);
+  border-bottom-color: var(--color-primary);
+  font-weight: 600;
+}
+.tab-dot {
+  color: var(--color-warn);
+}
+
+#tab-panel {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--spacing-3);
+}
+
+/* S-12 構造化Diff */
+.diff-tab-content .diff-row {
+  border-radius: var(--radius);
+  margin-bottom: var(--spacing-1);
+}
+
+/* S-13 Gherkin */
+#tab-panel pre[data-testid="gherkin-content"] {
+  background: var(--color-bg);
+  border-radius: var(--radius);
+  padding: var(--spacing-3);
+  overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.85rem;
+}
+.gherkin-actions {
+  margin-top: var(--spacing-2);
+}
+.gherkin-actions .btn {
+  width: auto;
+}
+
+/* S-14 変更履歴 */
+.history-entry {
+  padding: var(--spacing-2) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+.history-delta {
+  margin-top: var(--spacing-1);
+  padding-left: var(--spacing-3);
+  font-size: 0.9rem;
+}
+.history-delta-row {
+  margin: var(--spacing-1) 0;
+}
+
+/* machine 所有権警告ダイアログ(S-11) */
+[data-testid="dialog-machine-warning"] p {
+  max-width: 420px;
+}

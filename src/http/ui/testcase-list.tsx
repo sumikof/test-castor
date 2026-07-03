@@ -51,14 +51,16 @@ const PAGE_SIZE = 20;
 // display-category は「正常系/異常系/境界値/エラーハンドリング」というフルの日本語ラベルを明示して
 // いるため、カテゴリは「セル=略称・フィルタ選択肢=フル表記」の2形態を用意し、S-10 と語彙を揃える) ---
 const CATEGORY_SHORT: Record<Category, string> = { normal: '正常', abnormal: '異常', boundary: '境界', error_handling: 'エラー' };
-const CATEGORY_LABEL: Record<Category, string> = {
+/** S-10-testcase-detail.md の display-category が使うフルの日本語ラベル。task-20 の testcase-detail.tsx/
+ * testcase-form.tsx が同じ語彙を再利用する(export してこのファイルに一元化。重複定義しない)。 */
+export const CATEGORY_LABEL: Record<Category, string> = {
   normal: '正常系', abnormal: '異常系', boundary: '境界値', error_handling: 'エラーハンドリング',
 };
 const ACTION_LABEL: Record<BulkAction, string> = { approve: '承認', archive: 'アーカイブ', restore: '復帰' };
 
 /** epoch ms → "YYYY-MM-DD HH:mm"。UTC 固定で算出する(サーバ実行環境の TZ に依存させず、
- * テストの決定性も確保するため)。 */
-function formatDateTime(epochMs: number): string {
+ * テストの決定性も確保するため)。task-20 の testcase-detail.tsx が同じ関数を再利用する(export)。 */
+export function formatDateTime(epochMs: number): string {
   const d = new Date(epochMs);
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
@@ -626,7 +628,7 @@ function TestCaseListPage(props: TestCaseListPageProps) {
  * layout.tsx の renderForbiddenPage(page-403-title)と同じ流儀でこのタスク内で採番する(GC-8 の趣旨に
  * 沿った内部一貫性のため)。
  */
-function renderProjectNotFound(c: Context<AppEnv>, user: UserRow, csrf: string) {
+export function renderProjectNotFound(c: Context<AppEnv>, user: UserRow, csrf: string) {
   return c.html(
     <Layout title="プロジェクトが見つかりません" user={user} csrf={csrf}>
       <div class="empty-state">
