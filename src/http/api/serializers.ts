@@ -4,7 +4,7 @@
 // 返す場合があるため、ここでは「その行が持ちうる全フィールド」を返す完全形として定義し、
 // 呼び出し側(setup.ts/auth.ts 等)がドキュメントの契約に合わせて必要なフィールドのみを選び取る。
 // 以後のタスク(ユーザー管理 API 等)がここにシリアライザを追記していく。
-import type { UserRow, OrganizationRow, ProjectRow } from '../../storage/schema';
+import type { UserRow, OrganizationRow, ProjectRow, ApiTokenRow } from '../../storage/schema';
 
 /** apis/users.md(Task 9以降)向けの完全形。last_login_at(D-05)を含む。 */
 export function toUserJson(row: UserRow) {
@@ -40,5 +40,21 @@ export function toOrganizationJson(row: OrganizationRow) {
     id: row.id,
     name: row.name,
     created_at: row.createdAt,
+  };
+}
+
+/**
+ * apis/tokens.md GET一覧向け。`token_hash` は絶対に含めない(auth-security.md「平文の隔離」)ため、
+ * ApiTokenRow を丸ごとスプレッドせず許可された5フィールドだけを明示的に選び取る。
+ * 発行(POST)レスポンスは平文 `token` を含む別形状(この応答のみで1回返す)のため、ここでは扱わない
+ * — tokens.ts の POST ハンドラが個別に組み立てる。
+ */
+export function toTokenJson(row: ApiTokenRow) {
+  return {
+    id: row.id,
+    name: row.name,
+    created_at: row.createdAt,
+    revoked_at: row.revokedAt,
+    last_used_at: row.lastUsedAt,
   };
 }

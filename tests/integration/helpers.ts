@@ -170,3 +170,32 @@ export async function createProject(
   const body = await res.json<any>();
   return { res, body };
 }
+
+/**
+ * POST /api/v1/projects/:pid/tokens を実行し、発行された平文トークンだけを返す(task-11-brief.md
+ * 「テストヘルパ追記」)。平文はこの応答限りでしか取得できない(auth-security.md「平文の隔離」)ため、
+ * 以後のタスク(同期プロトコルの統合テスト等)が Bearer 認証を組み立てる際の唯一の入手経路になる。
+ * admin セッションの jar/csrf が必要。失敗時(403/422等)は例外を投げる(createProject と異なり
+ * Promise<string> しか返せないため、呼び出し側は「発行成功」を前提にできる契約にする)。
+ */
+export async function issueToken(
+  app: Hono<AppEnv>,
+  adminCtx: { jar: Record<string, string>; csrf?: string },
+  pid: string,
+  name: string,
+): Promise<string> {
+  const res = await app.request(`/api/v1/projects/${pid}/tokens`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      Cookie: cookieHeader(adminCtx.jar),
+      'x-csrf-token': adminCtx.csrf ?? '',
+    },
+    body: JSON.stringify({ name }),
+  });
+  if (res.status !== 201) {
+    throw new Error(`issueToken: issue failed with status ${res.status}: ${await res.text()}`);
+  }
+  const body = await res.json<any>();
+  return body.token;
+}
