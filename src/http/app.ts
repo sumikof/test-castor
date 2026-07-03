@@ -11,6 +11,8 @@ import type { AppConfig } from './config';
 import type { RateLimiter } from '../ratelimit/interface';
 import { AppError } from './errors';
 import { errorMiddleware } from './middleware/error';
+import { setupRoutes } from './api/setup';
+import { authRoutes } from './api/auth';
 
 export interface AppDeps {
   storage: Storage;
@@ -51,7 +53,9 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     }
   });
 
-  // 以後のタスクがここに `/api/v1` 配下のルートを app.route(...) で追記していく。
+  // /api/v1 配下のルート登録。以後のタスクがここに追記していく(Task 8: setup/auth)。
+  app.route('/api/v1/setup', setupRoutes);
+  app.route('/api/v1/auth', authRoutes);
 
   app.onError(errorMiddleware);
   app.notFound(() => {
