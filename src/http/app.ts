@@ -14,6 +14,7 @@ import { errorMiddleware } from './middleware/error';
 import { setupRoutes } from './api/setup';
 import { authRoutes } from './api/auth';
 import { usersRoutes } from './api/users';
+import { projectsRoutes } from './api/projects';
 
 export interface AppDeps {
   storage: Storage;
@@ -54,10 +55,11 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     }
   });
 
-  // /api/v1 配下のルート登録。以後のタスクがここに追記していく(Task 8: setup/auth、Task 9: users)。
+  // /api/v1 配下のルート登録。以後のタスクがここに追記していく(Task 8: setup/auth、Task 9: users、Task 10: projects)。
   app.route('/api/v1/setup', setupRoutes);
   app.route('/api/v1/auth', authRoutes);
   app.route('/api/v1/users', usersRoutes);
+  app.route('/api/v1/projects', projectsRoutes);
 
   app.onError(errorMiddleware);
   app.notFound(() => {

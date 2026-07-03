@@ -146,3 +146,27 @@ export async function setupAndLogin(
   }
   return { jar: login.jar, csrf: login.csrf, user: login.user };
 }
+
+/**
+ * POST /api/v1/projects を実行する(task-10-brief.md「テストヘルパ追記」。以後のタスク(トークン/
+ * テストケース API 等)がプロジェクト前提を満たすために共有する)。admin セッションの jar/csrf
+ * (setupAndLogin/loginAs の戻り値をそのまま渡せる)が必要。失敗時(403/422等)も呼べるよう例外は投げない。
+ */
+export async function createProject(
+  app: Hono<AppEnv>,
+  adminCtx: { jar: Record<string, string>; csrf?: string },
+  name: string,
+  repoUrl?: string | null,
+): Promise<{ res: Response; body: any }> {
+  const res = await app.request('/api/v1/projects', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      Cookie: cookieHeader(adminCtx.jar),
+      'x-csrf-token': adminCtx.csrf ?? '',
+    },
+    body: JSON.stringify({ name, ...(repoUrl !== undefined ? { repo_url: repoUrl } : {}) }),
+  });
+  const body = await res.json<any>();
+  return { res, body };
+}

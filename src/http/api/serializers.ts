@@ -4,7 +4,7 @@
 // 返す場合があるため、ここでは「その行が持ちうる全フィールド」を返す完全形として定義し、
 // 呼び出し側(setup.ts/auth.ts 等)がドキュメントの契約に合わせて必要なフィールドのみを選び取る。
 // 以後のタスク(ユーザー管理 API 等)がここにシリアライザを追記していく。
-import type { UserRow, OrganizationRow } from '../../storage/schema';
+import type { UserRow, OrganizationRow, ProjectRow } from '../../storage/schema';
 
 /** apis/users.md(Task 9以降)向けの完全形。last_login_at(D-05)を含む。 */
 export function toUserJson(row: UserRow) {
@@ -16,6 +16,22 @@ export function toUserJson(row: UserRow) {
     created_at: row.createdAt,
     updated_at: row.updatedAt,
     last_login_at: row.lastLoginAt,
+  };
+}
+
+/**
+ * apis/projects.md 向け。`testcaseCount` を渡すと D-05 の `testcase_count` を含める。
+ * GET /api/v1/projects の一覧アイテムは呼び出し側が testcaseCount を渡す。POST/PATCH レスポンスは
+ * docs/apis/projects.md のフィールド表に testcase_count が無いため、呼び出し側は省略する。
+ */
+export function toProjectJson(row: ProjectRow, testcaseCount?: number) {
+  return {
+    id: row.id,
+    name: row.name,
+    repo_url: row.repoUrl,
+    ...(testcaseCount !== undefined ? { testcase_count: testcaseCount } : {}),
+    created_at: row.createdAt,
+    updated_at: row.updatedAt,
   };
 }
 
