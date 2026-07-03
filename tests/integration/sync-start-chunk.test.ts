@@ -442,54 +442,80 @@ describe('統合: 同期プロトコル start/chunk(task-15-brief.md)', () => {
     // 記録する出現台帳であり、Task 16 の commit 工程3/4(stale 判定)はこれを根拠にする(sync-protocol.md
     // 「変化点のみ記録」との緊張関係を解決する設計。task-15-brief.md「⚠ 設計上の重要ノート」参照)。
     // 実装は正しい(seenRows は変化点フィルタ前の全 ref から作られる)が、これまで sync_seen の中身を
-    // 直接検証するテストが無く、「変化なし(duplicate)ref を sync_seen へ書く」経路が changed-only に
-    // 回帰しても検知できなかった。ここでは同一セッション内で fingerprint 不変の再送(duplicate。観測行は
-    // 増えない)を作り、Task 15 時点では読み出し API が無いため env.DB を直接クエリして sync_seen の中身を
-    // 検証する。
+    // 直接検証するテストが無かった。
+    //
+    // review round 2(非判別テストの修正): 当初この検証は「同一セッション内で ext-seen-a を1st chunk で
+    // 新規投入(inserted)し、2nd chunk で再送(duplicate)」という構成だったが、これでは changed-only 回帰
+    // (seenRows を refs 全体ではなく changedRefs のみから作るバグ)を検知できない。ext-seen-a は1st chunk
+    // 時点では「初出」= changed 扱いのため、正しい実装・回帰した実装のどちらでも1st chunk の時点で
+    // sync_seen へ書かれてしまい、2nd chunk の再送はその既存行に対する ON CONFLICT DO NOTHING の
+    // 冪等 INSERT にしかならない。つまり最終的な sync_seen の中身はどちらの実装でも
+    // {ext-seen-a, ext-seen-c} に一致し、区別できなかった。
+    // 対策として、helpers-seed.ts の seedCommittedObservation で「前回 committed 済みの観測」を DB に
+    // 直挿しする(seedCommittedObservation は sync_sessions/test_case_observations/test_case_identities
+    // のみへ書き込み、sync_seen には一切書き込まない)。これにより、これから開始する新規セッションの
+    // 最初のチャンクの時点で ext-seen-x はすでに committed-JOIN フェンスの比較対象になっており、
+    // fingerprint 一致で最初から duplicate 判定になる(このセッション内では一度も「changed」になった
+    // ことがない)。この状態でもこのセッションの sync_token に ext-seen-x の sync_seen 行が存在すれば、
+    // それは refs 全体から seenRows を作る(append-all)実装でしか説明がつかない。changed-only 回帰の下
+    // では ext-seen-x はこのセッションの sync_seen に一度も現れないため、欠落として検知できる。
     it(
-      '重要: 同一セッション内で fingerprint 不変の再送(duplicate)refも、新規(inserted)refと同様に' +
-        ' sync_seen へ記録される(env.DB を直接クエリして検証)',
+      '重要: committed 基準と比べて fingerprint 不変(duplicate)の ref も、新規(inserted)ref と同様に' +
+        'そのセッションの sync_seen へ記録される(changed-only 回帰の検知。env.DB を直接クエリして検証)',
       async () => {
-        const { pid, apiToken } = await setupProjectWithToken(ctx, 'sync-seen-project', 'sync-seen-sat');
+        const { admin, pid, apiToken } = await setupProjectWithToken(ctx, 'sync-seen-project', 'sync-seen-sat');
+
+        // commit(Task 16)未実装のため、helpers-seed.ts で「前回 committed 済みの観測」を直挿しする
+        // (task-14-brief.md と同じ decoupling 方針。「変化なし ref の別セッション再送」と同じ構成)。
+        // seedCommittedObservation は sync_seen に書き込まないため、ext-seen-x はこの時点で
+        // sync_seen 行を1つも持たない。
+        const created = await (
+          await ctx.app.request(
+            `/api/v1/projects/${pid}/testcases`,
+            jsonReq(
+              'POST',
+              { title: 'seen-baseline', category: 'normal', given: 'g', when: 'w', then: 't' },
+              { Cookie: cookieHeader(admin.jar), 'x-csrf-token': admin.csrf ?? '' },
+            ),
+          )
+        ).json<any>();
+        await seedCommittedObservation(ctx.rawExec, {
+          pid, testCaseId: created.id, externalRef: 'ext-seen-x', origin: 'discovery-v1',
+          fingerprint: 'fp-seen-x', observed: OBS_FIXTURE, at: FIXED_NOW - 1000,
+        });
+
+        // フレッシュな(新規の)セッションを開始する。ext-seen-x はこのセッションではまだ一度も
+        // 送信されていない = このセッション内では一度も「changed」になっていない。
         const started = await startSync(ctx.app, apiToken, pid, 'discovery-v1');
-
-        // 1st chunk: refA@fp1 を新規投入(inserted)。
-        const first = await ctx.app.request(
-          chunkUrl(pid, started.sync_token),
-          bearerReq('POST', apiToken, {
-            observations: [{ external_ref: 'ext-seen-a', fingerprint: 'fp-seen-1', observed: OBS_FIXTURE }],
-          }),
-        );
-        expect(first.status).toBe(200);
-        expect(await first.json<any>()).toEqual({ accepted: 1, received: [{ external_ref: 'ext-seen-a', outcome: 'inserted' }] });
-
-        // 2nd chunk(同一セッション): refA@fp1 を再送(fingerprint 不変 → duplicate。観測行は増えない) +
-        // refC@fp2 を新規投入(inserted)。
-        const second = await ctx.app.request(
+        const res = await ctx.app.request(
           chunkUrl(pid, started.sync_token),
           bearerReq('POST', apiToken, {
             observations: [
-              { external_ref: 'ext-seen-a', fingerprint: 'fp-seen-1', observed: OBS_FIXTURE },
-              { external_ref: 'ext-seen-c', fingerprint: 'fp-seen-2', observed: OBS_FIXTURE },
+              // committed 基準の fingerprint と一致 → duplicate(観測行は作られない)。
+              { external_ref: 'ext-seen-x', fingerprint: 'fp-seen-x', observed: OBS_FIXTURE },
+              // 初出 → inserted。
+              { external_ref: 'ext-seen-y', fingerprint: 'fp-seen-y', observed: OBS_FIXTURE },
             ],
           }),
         );
-        expect(second.status).toBe(200);
-        const secondBody = await second.json<any>();
-        expect(secondBody.accepted).toBe(2);
-        expect(secondBody.received).toEqual(expect.arrayContaining([
-          { external_ref: 'ext-seen-a', outcome: 'duplicate' },
-          { external_ref: 'ext-seen-c', outcome: 'inserted' },
+        expect(res.status).toBe(200);
+        const body = await res.json<any>();
+        expect(body.accepted).toBe(2);
+        expect(body.received).toEqual(expect.arrayContaining([
+          { external_ref: 'ext-seen-x', outcome: 'duplicate' },
+          { external_ref: 'ext-seen-y', outcome: 'inserted' },
         ]));
 
-        // duplicate outcome の ext-seen-a が sync_seen に欠落していれば「append-all」不変条件が破れている
-        // (changed-only refへの回帰の検知手段)。sync_seen はこのセッション専用(sync_token でスコープ)。
+        // このセッション(sync_token)の sync_seen に ext-seen-x(duplicate)・ext-seen-y(inserted)の
+        // 両方が記録されていることを検証する。changed-only 回帰(seenRows を changedRefs のみから作る)
+        // の下では、ext-seen-x はこのセッションで一度も changed になっていないため sync_seen から
+        // 欠落するはず(discriminates)。
         const seenRows = await env.DB
           .prepare('SELECT external_ref FROM sync_seen WHERE sync_token = ?')
           .bind(started.sync_token)
           .all<{ external_ref: string }>();
         const seenRefs = (seenRows.results ?? []).map((r) => r.external_ref).sort();
-        expect(seenRefs).toEqual(['ext-seen-a', 'ext-seen-c']); // refA はちょうど1回(uq_seen)・refC も記録されている
+        expect(seenRefs).toEqual(['ext-seen-x', 'ext-seen-y']);
       },
     );
   });
