@@ -237,6 +237,11 @@ function SyncSummaryPanel(props: { pid: string; status: SyncStatusResult }) {
     'hx-swap': 'outerHTML',
     'hx-push-url': 'true',
   }) as const;
+  // design D-01「S-08 パネルへの対応」: 「新規 N 件」= last_summary.created(直近の同期で新規作成された
+  // 件数)。current.unreviewed は draft&&machine の累積残件数であり別概念のため、プロジェクト全体の
+  // 「新規」表示には全 origin の lastSummary.created を合算する(各 origin ブロックは従来どおり
+  // origin 単位の created をそのまま表示する。ここでは project-level の集計値のみを additionally 計算)。
+  const totalNewCreated = origins.reduce((sum, o) => sum + o.lastSummary.created, 0);
 
   return (
     <div class="sync-summary" data-testid="sync-summary">
@@ -250,7 +255,7 @@ function SyncSummaryPanel(props: { pid: string; status: SyncStatusResult }) {
         </div>
       ))}
       <div class="sync-summary-counts">
-        <a data-testid="sync-new-count" {...linkAttrs({ status: 'draft', ownership: 'machine' })}>新規: {current.unreviewed}件</a>
+        <a data-testid="sync-new-count" {...linkAttrs({ status: 'draft', ownership: 'machine' })}>新規: {totalNewCreated}件</a>
         <a data-testid="sync-drift-count" {...linkAttrs({ drift: true })}>drift: {current.drift}件</a>
         <a data-testid="sync-stale-count" {...linkAttrs({ is_stale: true })}>stale: {current.stale}件</a>
       </div>

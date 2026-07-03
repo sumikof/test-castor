@@ -440,17 +440,98 @@ describe('SSR: テストケース一覧(S-08)+ 一括操作確認(S-15)', () => 
       expect(attrValue(nextTag3, 'aria-disabled')).toBe('true');
     });
 
-    it('同期サマリーパネル: origin別最終同期時刻 + 非ゼロの新規/drift/stale件数(current)を表示する(D-01)', async () => {
+    // review round 1(Important #2): 全カウントテストが limit≥該当行数 で total==items.length に
+    // なってしまい、「testcase-count が本当にフィルタ適用後の全件数(D-03: 正確な total)を示している」
+    // ことと「単に描画された行数を数えて表示しているだけ」ことを区別できていなかった。limit をフィルタ
+    // 該当件数より小さくし、total(5) と実際に描画される行数(2)が異なることを直接検証する。
+    it('該当件数(testcase-count)はフィルタ適用後の全件数を示す。limit未満のページ行数に切り詰めない', async () => {
+      const admin = await setupAndLogin(ctx.app);
+      const { body: project } = await createProject(ctx.app, admin, 'total-vs-pagesize-svc');
+      const ids: string[] = [];
+      for (let i = 0; i < 5; i++) {
+        const id = crypto.randomUUID();
+        ids.push(id);
+        await seedTestCase(ctx.rawExec, {
+          id, pid: project.id, title: `draft-item-${i}`, category: 'normal', status: 'draft', ownership: 'human',
+          createdAt: FIXED_NOW - (5000 - i * 100),
+        });
+      }
+
+      const res = await ctx.app.request(
+        `/projects/${project.id}/testcases?status=draft&limit=2`,
+        { headers: { Cookie: cookieHeader(admin.jar) } },
+      );
+      const html = await res.text();
+
+      // total は5件(フィルタ該当の全件)。limit=2の1ページ目に描画される行は2件のみ。
+      expect(tagText(html, 'testcase-count')).toBe('5');
+      const renderedRows = ids.filter((id) => hasTag(html, `testcase-row-${id}`));
+      expect(renderedRows.length).toBe(2);
+      // has_more=true の証拠(まだ3件残っている)として次へリンクが活性状態であることも確認する。
+      expect(findTag(html, 'btn-next-page')).toMatch(/^<a /);
+    });
+
+    it('同期サマリーパネル: sync-new-count は last_summary.created の合算値を表示する(current.unreviewedとは区別される)(D-01)', async () => {
       const admin = await setupAndLogin(ctx.app);
       const { body: project } = await createProject(ctx.app, admin, 'sync-summary-svc');
-      await seedFixture(ctx, project.id); // unreviewed=2(B,C) / drift=1(D) / stale=1(C) になるフィクスチャ
+
+      // current.unreviewed=2 / current.drift=3 / current.stale=4 / last_summary.created合算=5 と
+      // 4値すべてを非ゼロ・相互に異なる値にする(値がたまたま一致すると、誤ったbinding(例:
+      // sync-new-countにcurrent.unreviewedを表示)でも偶然パスしてしまい、spec上のマッピングを
+      // 判別できないテストになってしまうため)。
+      const mk = () => crypto.randomUUID();
+      // unreviewed(status=draft AND ownership=machine)× 2
+      await seedTestCase(ctx.rawExec, {
+        id: mk(), pid: project.id, title: 'unreviewed-1', category: 'normal', status: 'draft', ownership: 'machine',
+        createdAt: FIXED_NOW - 9000,
+      });
+      await seedTestCase(ctx.rawExec, {
+        id: mk(), pid: project.id, title: 'unreviewed-2', category: 'normal', status: 'draft', ownership: 'machine',
+        createdAt: FIXED_NOW - 8000,
+      });
+      // drift(status!=archived)× 3。human所有(status問わず制約を満たす)。
+      await seedTestCase(ctx.rawExec, {
+        id: mk(), pid: project.id, title: 'drift-1', category: 'normal', status: 'draft', ownership: 'human',
+        drift: true, createdAt: FIXED_NOW - 7000,
+      });
+      await seedTestCase(ctx.rawExec, {
+        id: mk(), pid: project.id, title: 'drift-2', category: 'normal', status: 'approved', ownership: 'human',
+        drift: true, createdAt: FIXED_NOW - 6000,
+      });
+      await seedTestCase(ctx.rawExec, {
+        id: mk(), pid: project.id, title: 'drift-3', category: 'normal', status: 'approved', ownership: 'human',
+        drift: true, createdAt: FIXED_NOW - 5000,
+      });
+      // stale(status!=archived)× 4。
+      await seedTestCase(ctx.rawExec, {
+        id: mk(), pid: project.id, title: 'stale-1', category: 'normal', status: 'draft', ownership: 'human',
+        isStale: true, createdAt: FIXED_NOW - 4000,
+      });
+      await seedTestCase(ctx.rawExec, {
+        id: mk(), pid: project.id, title: 'stale-2', category: 'normal', status: 'approved', ownership: 'human',
+        isStale: true, createdAt: FIXED_NOW - 3000,
+      });
+      await seedTestCase(ctx.rawExec, {
+        id: mk(), pid: project.id, title: 'stale-3', category: 'normal', status: 'approved', ownership: 'human',
+        isStale: true, createdAt: FIXED_NOW - 2000,
+      });
+      await seedTestCase(ctx.rawExec, {
+        id: mk(), pid: project.id, title: 'stale-4', category: 'normal', status: 'draft', ownership: 'human',
+        isStale: true, createdAt: FIXED_NOW - 1000,
+      });
+
+      // last_summary.created の合算=5(2 origin: 2+3)。単一 origin の値をそのまま出しているだけでは
+      // ないこと(複数 originを合算していること)も同時に確認する。
       const committedAt = FIXED_NOW - 100_000;
       await seedCommittedSyncSession(ctx.rawExec, {
-        pid: project.id, origin: 'github-actions', committedAt, createdCount: 3, changedCount: 2, staledCount: 1,
+        pid: project.id, origin: 'github-actions', committedAt, createdCount: 2, changedCount: 1, staledCount: 0,
+      });
+      await seedCommittedSyncSession(ctx.rawExec, {
+        pid: project.id, origin: 'gitlab-ci', committedAt: committedAt + 1000, createdCount: 3, changedCount: 1, staledCount: 1,
       });
 
       const res = await ctx.app.request(
-        `/projects/${project.id}/testcases?limit=10`,
+        `/projects/${project.id}/testcases?limit=20`,
         { headers: { Cookie: cookieHeader(admin.jar) } },
       );
       const html = await res.text();
@@ -464,10 +545,13 @@ describe('SSR: テストケース一覧(S-08)+ 一括操作確認(S-15)', () => 
         + `${String(d.getUTCMinutes()).padStart(2, '0')}`;
       expect(tagText(html, 'sync-last-time-github-actions')).toContain(expectedDatetime);
 
-      // current(非ゼロ識別。notes.md「ゼロ状態のみのテストは真バグを見逃す」対策)。
-      expect(tagText(html, 'sync-new-count')).toBe('新規: 2件');
-      expect(tagText(html, 'sync-drift-count')).toBe('drift: 1件');
-      expect(tagText(html, 'sync-stale-count')).toBe('stale: 1件');
+      // sync-new-count = last_summary.created の合算(2+3=5)。design doc D-01「S-08 パネルへの対応」:
+      // 「新規 N 件」= last_summary.created(current.unreviewed=2 とは異なる値なので、修正前の
+      // 実装(current.unreviewedを表示)であればここは「新規: 2件」になり本アサーションで失敗する)。
+      expect(tagText(html, 'sync-new-count')).toBe('新規: 5件');
+      // sync-drift-count / sync-stale-count は current.drift / current.stale をそのまま表示する。
+      expect(tagText(html, 'sync-drift-count')).toBe('drift: 3件');
+      expect(tagText(html, 'sync-stale-count')).toBe('stale: 4件');
 
       // 各カウントのリンク先(クリックで該当フィルタが適用される)。
       expect(attrValue(findTag(html, 'sync-new-count'), 'href')).toBe(
@@ -698,6 +782,31 @@ describe('SSR: テストケース一覧(S-08)+ 一括操作確認(S-15)', () => 
       const html = await listRes.text();
       expect(tagText(html, 'toast')).toBe('1件を承認しました（1件でエラー発生）');
       expect(findTag(html, 'toast')).toContain('toast-warn');
+    });
+
+    // review round 1(Important #1): buildBulkFlash の「skipped>0 かつ errors=0」分岐(成功トーン・
+    // 「N件を承認しました（M件はスキップ）」)を単独で通すテストが無く、既存の部分失敗テストは
+    // skip と error が同時に起きるケースしか踏んでいなかった。既に approved の行(→skip)のみを混ぜ、
+    // 存在しないid等のerror要因を含めないことで、このスキップのみ分岐を単独で踏む。
+    it('一部スキップ(既にapproved)のみ・エラー無し → flash「N件を承認しました（M件はスキップ）」(スキップのみ分岐)', async () => {
+      const admin = await setupAndLogin(ctx.app);
+      const { body: project } = await createProject(ctx.app, admin, 'bulk-skip-only-svc');
+      const ids = await seedFixture(ctx, project.id);
+      // ids.a は既に approved → skip。ids.b・ids.c は draft → update。エラー要因(存在しないid等)は含めない。
+      const res = await ctx.app.request(
+        `/projects/${project.id}/testcases/bulk-ui`,
+        bulkFormReq([ids.b, ids.c, ids.a], 'approve', admin.csrf ?? '', { Cookie: cookieHeader(admin.jar) }),
+      );
+      expect(res.status).toBe(303);
+      const loc = new URL(res.headers.get('location') as string, 'http://x');
+      expect(loc.searchParams.get('updated')).toBe('2');
+      expect(loc.searchParams.get('skipped')).toBe('1');
+      expect(loc.searchParams.get('errors')).toBe('0');
+
+      const listRes = await ctx.app.request(`${loc.pathname}${loc.search}`, { headers: { Cookie: cookieHeader(admin.jar) } });
+      const html = await listRes.text();
+      expect(tagText(html, 'toast')).toBe('2件を承認しました（1件はスキップ）');
+      expect(findTag(html, 'toast')).toContain('toast-success');
     });
 
     it('archive アクション → flash「N件のテストケースをアーカイブしました」', async () => {
