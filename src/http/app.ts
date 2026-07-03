@@ -20,6 +20,7 @@ import { testCasesRoutes } from './api/testcases';
 import { syncRoutes } from './api/sync';
 import { authPageRoutes } from './ui/auth-pages';
 import { projectPageRoutes } from './ui/projects-pages';
+import { testCasePageRoutes } from './ui/testcase-list';
 
 export interface AppDeps {
   storage: Storage;
@@ -80,6 +81,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   app.route('/', authPageRoutes);
   // S-06 プロジェクト一覧 / S-07 プロジェクト作成ダイアログ(task-18-brief.md)。
   app.route('/', projectPageRoutes);
+  // S-08 テストケース一覧 / S-15 一括操作確認ダイアログ(task-19-brief.md)。
+  app.route('/', testCasePageRoutes);
 
   app.onError(errorMiddleware);
   app.notFound(() => {

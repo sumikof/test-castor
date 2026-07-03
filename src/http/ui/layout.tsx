@@ -45,6 +45,10 @@ const FORM_ENHANCE_SCRIPT = `
     return !msg;
   }
   function attach(form) {
+    // 冪等ガード(T19/T20 申し送り): htmx:afterSwap の再スキャンで同じ form に2度目の attach が
+    // 走っても、リスナーを二重登録しない(2重 disabled トグル・2重 submit ハンドラを防ぐ)。
+    if (form.dataset.enhanced === '1') return;
+    form.dataset.enhanced = '1';
     var submit = form.querySelector('button[type=submit]');
     var inputs = Array.prototype.slice.call(form.querySelectorAll('input'));
     // SSR HTML はこの button に disabled を含めない(no-JS 送信可能にするため)。JS が実行できた
@@ -90,7 +94,22 @@ const FORM_ENHANCE_SCRIPT = `
     });
     refresh();
   }
-  Array.prototype.forEach.call(document.querySelectorAll('form[data-validate]'), attach);
+  function enhanceAll(root) {
+    if (!root || typeof root.querySelectorAll !== 'function') return;
+    Array.prototype.forEach.call(root.querySelectorAll('form[data-validate]'), attach);
+    // root 自身が対象になりうるケース(hx-swap="outerHTML" でフォーム自身が置換された場合等)。
+    if (root.matches && root.matches('form[data-validate]')) attach(root);
+  }
+  enhanceAll(document);
+  // T19/T20 申し送り(notes.md): FORM_ENHANCE_SCRIPT は読み込み時に一度だけ querySelectorAll するため、
+  // HTMX が #dialog-root や #testcase-list-section 等にスワップしたフラグメント内の新規フォームには
+  // 再作用しない(no-JS では元々サーバー検証が権威のため機能欠陥ではないが、spinner/disabled UX の
+  // 一貫性のため再エンハンスする)。htmx:afterSwap は swap された要素(detail.target 相当)をバブリングで
+  // 拾えるので、document に1回だけ委譲リスナーを張り、スワップされた部分木だけを再スキャンする。
+  // 既存フォーム(旧 DOM に残るもの)は dataset.enhanced ガードにより再アタッチされない。
+  document.body.addEventListener('htmx:afterSwap', function (evt) {
+    enhanceAll(evt.target || document);
+  });
 })();
 `;
 

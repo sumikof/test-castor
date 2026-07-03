@@ -488,3 +488,163 @@ th {
 .empty-state .btn {
   margin-top: var(--spacing-3);
 }
+
+/* ---- S-08(Task 19): テストケース一覧 ---- */
+
+.testcase-count-line {
+  color: var(--color-text-muted);
+  margin: 0 0 var(--spacing-3);
+}
+
+.filter-panel {
+  margin-bottom: var(--spacing-3);
+}
+.filter-panel [data-testid="btn-clear-filters"] {
+  display: inline-block;
+  margin-top: var(--spacing-1);
+}
+
+/* フィルタパネル: 横並び・折返し。各 .field は認証フォームの縦積み margin を上書きし、
+   ラベル+コントロールが横一列のコンパクトなセットになるようにする。 */
+.filter-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--spacing-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--spacing-3);
+  margin-bottom: var(--spacing-3);
+}
+.filter-form .field {
+  margin-bottom: 0;
+  min-width: 140px;
+}
+.filter-form .btn {
+  width: auto;
+}
+
+/* 同期サマリーパネル */
+.sync-summary {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--spacing-3);
+  margin-bottom: var(--spacing-3);
+}
+.sync-summary-origin {
+  display: flex;
+  gap: var(--spacing-2);
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+}
+.sync-summary-origin + .sync-summary-origin {
+  margin-top: var(--spacing-1);
+}
+.sync-summary-origin-name {
+  font-weight: 600;
+  color: var(--color-text);
+}
+.sync-summary-counts {
+  display: flex;
+  gap: var(--spacing-4);
+  margin-top: var(--spacing-2);
+  font-weight: 600;
+}
+
+/* 一括操作バー */
+.bulk-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-3);
+  padding: var(--spacing-2) var(--spacing-3);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  margin-bottom: var(--spacing-2);
+}
+.bulk-bar-select-all {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-1);
+}
+.bulk-action-menu {
+  position: relative;
+}
+.bulk-action-list {
+  position: absolute;
+  left: 0;
+  top: 100%;
+  z-index: 20;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  min-width: 140px;
+  padding: var(--spacing-1);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+}
+.bulk-action-list button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  font: inherit;
+  cursor: pointer;
+  padding: var(--spacing-2);
+  border-radius: var(--radius);
+}
+.bulk-action-list button:hover {
+  background: var(--color-bg);
+}
+
+/* テストケーステーブル */
+.testcase-results {
+  margin-top: var(--spacing-2);
+}
+.testcase-row:hover {
+  background: var(--color-bg);
+}
+.cell-title {
+  display: inline-block;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+.ownership-icon {
+  font-size: 1rem;
+}
+
+/* ページネーション */
+.pagination {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: var(--spacing-3);
+  margin-top: var(--spacing-3);
+}
+.pagination a.btn,
+.pagination span.btn {
+  width: auto;
+}
+.pagination span.btn[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* ---- S-15(Task 19): 一括操作確認ダイアログ ---- */
+.bulk-confirm-warnings {
+  background: var(--color-warn-bg);
+  color: var(--color-warn);
+  border-radius: var(--radius);
+  padding: var(--spacing-2) var(--spacing-3);
+  margin: var(--spacing-2) 0;
+  font-size: 0.88rem;
+}
+.bulk-confirm-warnings li {
+  margin: var(--spacing-1) 0;
+}
