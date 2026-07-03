@@ -4,7 +4,7 @@
 // 返す場合があるため、ここでは「その行が持ちうる全フィールド」を返す完全形として定義し、
 // 呼び出し側(setup.ts/auth.ts 等)がドキュメントの契約に合わせて必要なフィールドのみを選び取る。
 // 以後のタスク(ユーザー管理 API 等)がここにシリアライザを追記していく。
-import type { UserRow, OrganizationRow, ProjectRow, ApiTokenRow } from '../../storage/schema';
+import type { UserRow, OrganizationRow, ProjectRow, ApiTokenRow, TestCaseRow, TestCaseHistoryRow } from '../../storage/schema';
 
 /** apis/users.md(Task 9以降)向けの完全形。last_login_at(D-05)を含む。 */
 export function toUserJson(row: UserRow) {
@@ -56,5 +56,75 @@ export function toTokenJson(row: ApiTokenRow) {
     created_at: row.createdAt,
     revoked_at: row.revokedAt,
     last_used_at: row.lastUsedAt,
+  };
+}
+
+/**
+ * apis/testcases.md「GET /testcases/:id」「POST /testcases」向けの全フィールド形(両者は同一構造)。
+ * JSON 列(parameters/source_ref/metadata)を parse し、`updated_at` は D-05 の意味論
+ * (`max(human_updated_at, system_updated_at, created_at)`。human_updated_at/system_updated_at は
+ * どちらも null になり得るため 0 にフォールバックし、常に created_at 以上になることを保証する)で算出する。
+ */
+export function toTestCaseJson(row: TestCaseRow) {
+  return {
+    id: row.id,
+    title: row.title,
+    target: row.target,
+    category: row.category,
+    given: row.given,
+    when: row.when,
+    then: row.then,
+    parameters: row.parameters === null ? null : JSON.parse(row.parameters),
+    status: row.status,
+    is_stale: !!row.isStale,
+    ownership: row.ownership,
+    mirror_origin: row.mirrorOrigin,
+    drift: !!row.drift,
+    fingerprint: row.fingerprint,
+    version: row.version,
+    confidence: row.confidence,
+    source_ref: row.sourceRef === null ? null : JSON.parse(row.sourceRef),
+    created_origin: row.createdOrigin,
+    metadata: row.metadata === null ? null : JSON.parse(row.metadata),
+    created_at: row.createdAt,
+    updated_at: Math.max(row.humanUpdatedAt ?? 0, row.systemUpdatedAt ?? 0, row.createdAt),
+  };
+}
+
+/**
+ * apis/testcases.md「GET /testcases」一覧アイテムのフィールド表どおりのサブセット(11フィールド)。
+ * toTestCaseJson() の完全形から選び取ることで updated_at(D-05)の算出ロジックを重複させない。
+ */
+export function toTestCaseListItemJson(row: TestCaseRow) {
+  const full = toTestCaseJson(row);
+  return {
+    id: full.id,
+    title: full.title,
+    target: full.target,
+    category: full.category,
+    status: full.status,
+    ownership: full.ownership,
+    is_stale: full.is_stale,
+    drift: full.drift,
+    version: full.version,
+    created_at: full.created_at,
+    updated_at: full.updated_at,
+  };
+}
+
+/**
+ * apis/testcases.md「GET /testcases/:id/history」向け。delta(JSON列)を parse し、D-04 の
+ * `actor_display` を追加する(ドキュメントのフィールド表には未記載だが、スペック D-04 が明記する
+ * 非破壊な追加フィールド。global-constraints.md「スペックが優先」。タスク報告に doc 記載漏れを明示)。
+ */
+export function toHistoryJson(row: TestCaseHistoryRow & { actorDisplay: string }) {
+  return {
+    id: row.id,
+    test_case_id: row.testCaseId,
+    actor: row.actor,
+    action: row.action,
+    delta: JSON.parse(row.delta),
+    created_at: row.createdAt,
+    actor_display: row.actorDisplay,
   };
 }

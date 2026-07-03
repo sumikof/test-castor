@@ -1,10 +1,14 @@
 // src/storage/drizzle-storage.ts
-import { and, eq, ne, isNull, count, sql } from 'drizzle-orm';
+import { and, eq, ne, isNull, count, desc, sql } from 'drizzle-orm';
 import {
-  organizations, users, sessions, projects, apiTokens, testCases,
+  organizations, users, sessions, projects, apiTokens, testCases, testCaseHistory,
   type SessionRow,
 } from './schema';
-import type { Storage, OrgScope, SetupParams, CreateUserParams } from './interface';
+import type {
+  Storage, OrgScope, SetupParams, CreateUserParams,
+  TestCaseFilters, Page, NewTestCaseColumns, NewHistoryEntry,
+} from './interface';
+import { encodeCursor, decodeCursor } from '../domain/cursor';
 
 // 3アダプタの差(batch/transaction/raw)を吸収する薄いドライバ
 export type AnyQuery = { run(): unknown };
@@ -23,6 +27,21 @@ function isUniqueViolation(e: unknown): boolean {
     if (String((err as Error).message ?? err).includes('UNIQUE')) return true;
   }
   return false;
+}
+
+// task-13-brief.md「target は LIKE '%'||target||'%'(部分一致)。LIKE メタ文字(%_)はエスケープする」。
+// バックスラッシュを先にエスケープしてから %/_ をエスケープする(順序を逆にすると二重エスケープになる)。
+function escapeLike(s: string): string {
+  return s.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+}
+
+// api-reference.md「カーソルベースページング」(タイブレーカー: (created_at, id) の安定ソート)。
+// 不正なカーソル(decodeCursor が null を返す)は「先頭から」にフォールバックする(undefined を返す)。
+function cursorPredicate(cursor: string | undefined, createdAtCol: any, idCol: any) {
+  if (!cursor) return undefined;
+  const decoded = decodeCursor(cursor);
+  if (!decoded) return undefined;
+  return sql`(${createdAtCol} < ${decoded.createdAt}) OR (${createdAtCol} = ${decoded.createdAt} AND ${idCol} < ${decoded.id})`;
 }
 
 export function createDrizzleStorage(driver: StorageDriver): Storage {
@@ -189,6 +208,119 @@ export function createDrizzleStorage(driver: StorageDriver): Storage {
           eq(apiTokens.id, tokenId),
           sql`(${apiTokens.lastUsedAt} IS NULL OR ${apiTokens.lastUsedAt} <= ${now - thresholdMs})`,
         )).run();
+    },
+
+    // --- test cases(task-13-brief.md)---
+    async createTestCaseManual(scope: OrgScope, pid: string, row: NewTestCaseColumns, history: NewHistoryEntry, now: number) {
+      const id = uuid();
+      const tcRow = {
+        id,
+        projectId: pid,
+        title: row.title,
+        target: row.target,
+        category: row.category,
+        given: row.given,
+        when: row.when,
+        then: row.then,
+        parameters: row.parameters === null ? null : JSON.stringify(row.parameters),
+        status: row.status,
+        isStale: 0,
+        ownership: 'human',
+        mirrorOrigin: null,
+        drift: 0,
+        fingerprint: null,
+        version: 1,
+        confidence: row.confidence,
+        sourceRef: row.sourceRef === null ? null : JSON.stringify(row.sourceRef),
+        createdOrigin: 'manual',
+        metadata: row.metadata === null ? null : JSON.stringify(row.metadata),
+        humanUpdatedAt: now,
+        systemUpdatedAt: null,
+        createdAt: now,
+      };
+      const historyRow = {
+        id: uuid(),
+        testCaseId: id,
+        actor: history.actor,
+        action: history.action,
+        delta: JSON.stringify(history.delta),
+        createdAt: now,
+      };
+      await driver.batch([db.insert(testCases).values(tcRow), db.insert(testCaseHistory).values(historyRow)]);
+      return tcRow as any;
+    },
+
+    async getTestCase(scope: OrgScope, pid: string, id: string) {
+      const [row] = await db.select().from(testCases)
+        .where(and(eq(testCases.id, id), eq(testCases.projectId, pid)));
+      return row ?? null;
+    },
+
+    async listTestCases(scope: OrgScope, pid: string, f: TestCaseFilters, page: Page) {
+      const conditions = [eq(testCases.projectId, pid)];
+      if (f.status) conditions.push(eq(testCases.status, f.status));
+      if (f.category) conditions.push(eq(testCases.category, f.category));
+      if (f.ownership) conditions.push(eq(testCases.ownership, f.ownership));
+      if (f.drift !== undefined) conditions.push(eq(testCases.drift, f.drift ? 1 : 0));
+      if (f.isStale !== undefined) conditions.push(eq(testCases.isStale, f.isStale ? 1 : 0));
+      if (f.target !== undefined) {
+        conditions.push(sql`${testCases.target} LIKE ${`%${escapeLike(f.target)}%`} ESCAPE '\\'`);
+      }
+      const whereBase = and(...conditions);
+
+      const [totalRow] = await db.select({ n: count() }).from(testCases).where(whereBase);
+
+      const cursorCond = cursorPredicate(page.cursor, testCases.createdAt, testCases.id);
+      const whereFull = cursorCond ? and(whereBase, cursorCond) : whereBase;
+
+      const rows = await db.select().from(testCases).where(whereFull)
+        .orderBy(desc(testCases.createdAt), desc(testCases.id))
+        .limit(page.limit + 1);
+
+      const hasMore = rows.length > page.limit;
+      const items = hasMore ? rows.slice(0, page.limit) : rows;
+      const last = items[items.length - 1];
+      const nextCursor = hasMore && last ? encodeCursor({ createdAt: last.createdAt, id: last.id }) : null;
+
+      return { items, total: Number(totalRow?.n ?? 0), nextCursor, hasMore };
+    },
+
+    async listHistory(scope: OrgScope, pid: string, id: string, page: Page) {
+      const whereBase = and(eq(testCaseHistory.testCaseId, id), eq(testCases.projectId, pid));
+
+      const [totalRow] = await db.select({ n: count() })
+        .from(testCaseHistory)
+        .innerJoin(testCases, eq(testCases.id, testCaseHistory.testCaseId))
+        .where(whereBase);
+
+      const cursorCond = cursorPredicate(page.cursor, testCaseHistory.createdAt, testCaseHistory.id);
+      const whereFull = cursorCond ? and(whereBase, cursorCond) : whereBase;
+
+      // D-04: actor='user:<id>' → users.display_name、'token:<id>' → api_tokens.name、
+      // どちらにも一致しなければ actor の生値(COALESCE のフォールバック)。
+      const rows = await db.select({
+        id: testCaseHistory.id,
+        testCaseId: testCaseHistory.testCaseId,
+        actor: testCaseHistory.actor,
+        action: testCaseHistory.action,
+        delta: testCaseHistory.delta,
+        createdAt: testCaseHistory.createdAt,
+        actorDisplay: sql<string>`COALESCE(${users.displayName}, ${apiTokens.name}, ${testCaseHistory.actor})`,
+      })
+        .from(testCaseHistory)
+        .innerJoin(testCases, eq(testCases.id, testCaseHistory.testCaseId))
+        .leftJoin(users, sql`${testCaseHistory.actor} = 'user:' || ${users.id}`)
+        .leftJoin(apiTokens, sql`${testCaseHistory.actor} = 'token:' || ${apiTokens.id}`)
+        .where(whereFull)
+        .orderBy(desc(testCaseHistory.createdAt), desc(testCaseHistory.id))
+        .limit(page.limit + 1);
+
+      const hasMore = rows.length > page.limit;
+      const items = hasMore ? rows.slice(0, page.limit) : rows;
+      const last = items[items.length - 1];
+      const nextCursor = hasMore && last ? encodeCursor({ createdAt: last.createdAt, id: last.id }) : null;
+
+      return { items, total: Number(totalRow?.n ?? 0), nextCursor, hasMore };
     },
   } satisfies Storage;
 

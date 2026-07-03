@@ -1,6 +1,6 @@
 // tests/contract/storage-contract.ts
 import { describe, it, expect, beforeEach } from 'vitest';
-import type { Storage } from '../../src/storage/interface';
+import type { Storage, NewTestCaseColumns, NewHistoryEntry } from '../../src/storage/interface';
 
 export interface ContractCtx {
   storage: Storage;
@@ -10,6 +10,28 @@ const WIPE_ORDER = [
   'test_case_history', 'test_case_observations', 'sync_staging', 'sync_sessions',
   'test_case_identities', 'test_cases', 'api_tokens', 'sessions', 'projects', 'users', 'organizations',
 ];
+
+/** task-13-brief.md「Step 1」向けの NewTestCaseColumns デフォルト値。テストごとに必要な列だけ上書きする。 */
+function tcInput(overrides: Partial<NewTestCaseColumns> = {}): NewTestCaseColumns {
+  return {
+    title: 'サンプルテストケース',
+    target: null,
+    category: 'normal',
+    given: 'given',
+    when: 'when',
+    then: 'then',
+    parameters: null,
+    status: 'draft',
+    confidence: null,
+    sourceRef: null,
+    metadata: null,
+    ...overrides,
+  };
+}
+
+function historyEntry(overrides: Partial<NewHistoryEntry> = {}): NewHistoryEntry {
+  return { actor: 'user:00000000-0000-0000-0000-0000000000ff', action: 'created', delta: {}, ...overrides };
+}
 
 export function runStorageContract(name: string, factory: () => Promise<ContractCtx>) {
   describe(`Storage contract: ${name}`, () => {
@@ -165,6 +187,200 @@ export function runStorageContract(name: string, factory: () => Promise<Contract
       const remaining = remainingSessions.filter((s) => s !== null);
       expect(remaining.length).toBe(1);
       expect(remaining[0]!.expiresAt).toBe(now);
+    });
+
+    // task-13-brief.md「Step 1: 契約テスト追記」
+    it(
+      'testcases: createTestCaseManual → getTestCase 往復。手動作成の業務ルール' +
+        '(ownership=human/created_origin=manual/version=1/human_updated_at=now/system_updated_at=null/' +
+        'fingerprint=null/is_stale=0/drift=0)を満たし、履歴に created(delta={})が記録される',
+      async () => {
+        const p = await ctx.storage.createProject(scope, { name: 'proj' }, now);
+        const input = tcInput({
+          title: '正常な支払い処理',
+          target: 'com.example.PaymentService#charge',
+          category: 'normal',
+          given: 'G',
+          when: 'W',
+          then: 'T',
+          parameters: [{ inputs: { a: 1 }, expected: 'ok' }],
+          status: 'draft',
+          confidence: 0.9,
+          sourceRef: { file: 'X.java', line: 1 },
+          metadata: { tags: ['x'] },
+        });
+        const created = await ctx.storage.createTestCaseManual(scope, p.id, input, historyEntry({ actor: 'user:abc' }), now);
+
+        expect(created.title).toBe('正常な支払い処理');
+        expect(created.ownership).toBe('human');
+        expect(created.createdOrigin).toBe('manual');
+        expect(created.version).toBe(1);
+        expect(created.humanUpdatedAt).toBe(now);
+        expect(created.systemUpdatedAt).toBeNull();
+        expect(created.fingerprint).toBeNull();
+        expect(created.isStale).toBe(0);
+        expect(created.drift).toBe(0);
+        expect(created.mirrorOrigin).toBeNull();
+        expect(created.createdAt).toBe(now);
+        expect(JSON.parse(created.parameters ?? 'null')).toEqual([{ inputs: { a: 1 }, expected: 'ok' }]);
+        expect(JSON.parse(created.sourceRef ?? 'null')).toEqual({ file: 'X.java', line: 1 });
+        expect(JSON.parse(created.metadata ?? 'null')).toEqual({ tags: ['x'] });
+
+        const got = await ctx.storage.getTestCase(scope, p.id, created.id);
+        expect(got).toEqual(created); // 往復で完全一致
+
+        const history = await ctx.storage.listHistory(scope, p.id, created.id, { limit: 10 });
+        expect(history.items).toHaveLength(1);
+        expect(history.items[0]?.action).toBe('created');
+        expect(JSON.parse(history.items[0]?.delta ?? '{}')).toEqual({});
+        expect(history.items[0]?.actor).toBe('user:abc');
+      },
+    );
+
+    it('testcases: listTestCases はフィルタ(status/ownership/target部分一致・LIKEメタ文字エスケープ/drift/isStale)をAND結合で適用する', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-filter' }, now);
+
+      const draftHuman = await ctx.storage.createTestCaseManual(
+        scope, p.id, tcInput({ title: 'draft-human', status: 'draft' }), historyEntry(), now,
+      );
+      const approvedHuman = await ctx.storage.createTestCaseManual(
+        scope, p.id, tcInput({ title: 'approved-human', status: 'approved' }), historyEntry(), now,
+      );
+      const machineDriftStale = await ctx.storage.createTestCaseManual(
+        scope, p.id, tcInput({ title: 'machine-drift-stale', status: 'draft' }), historyEntry(), now,
+      );
+      // createTestCaseManual は常に ownership=human/drift=0/is_stale=0 で作る(業務ルール)ため、
+      // machine 所有 + drift + stale の組み合わせは直接 UPDATE で用意する(status は 'draft' のまま
+      // 変更しないため ck_tc_status_ownership の複合 CHECK も引き続き満たす)。
+      await ctx.rawExec(
+        `UPDATE test_cases SET ownership='machine', drift=1, is_stale=1 WHERE id='${machineDriftStale.id}'`,
+      );
+
+      const targetPercent = await ctx.storage.createTestCaseManual(
+        scope, p.id, tcInput({ title: 'percent-target', target: '100%Coverage' }), historyEntry(), now,
+      );
+      const targetNoPercent = await ctx.storage.createTestCaseManual(
+        scope, p.id, tcInput({ title: 'no-percent-target', target: '100XCoverage' }), historyEntry(), now,
+      );
+      const targetUnderscore = await ctx.storage.createTestCaseManual(
+        scope, p.id, tcInput({ title: 'underscore-target', target: 'A_B_Test' }), historyEntry(), now,
+      );
+      const targetNoUnderscore = await ctx.storage.createTestCaseManual(
+        scope, p.id, tcInput({ title: 'no-underscore-target', target: 'AXBXTest' }), historyEntry(), now,
+      );
+
+      const draftOnly = await ctx.storage.listTestCases(scope, p.id, { status: 'draft' }, { limit: 50 });
+      expect(draftOnly.items.map((i) => i.id).sort()).toEqual(
+        [draftHuman.id, machineDriftStale.id, targetPercent.id, targetNoPercent.id, targetUnderscore.id, targetNoUnderscore.id].sort(),
+      );
+      expect(draftOnly.items.some((i) => i.id === approvedHuman.id)).toBe(false);
+
+      const humanOnly = await ctx.storage.listTestCases(scope, p.id, { ownership: 'human' }, { limit: 50 });
+      expect(humanOnly.items.some((i) => i.id === machineDriftStale.id)).toBe(false);
+      const machineOnly = await ctx.storage.listTestCases(scope, p.id, { ownership: 'machine' }, { limit: 50 });
+      expect(machineOnly.items.map((i) => i.id)).toEqual([machineDriftStale.id]);
+
+      const driftOnly = await ctx.storage.listTestCases(scope, p.id, { drift: true }, { limit: 50 });
+      expect(driftOnly.items.map((i) => i.id)).toEqual([machineDriftStale.id]);
+      const noDrift = await ctx.storage.listTestCases(scope, p.id, { drift: false }, { limit: 50 });
+      expect(noDrift.items.some((i) => i.id === machineDriftStale.id)).toBe(false);
+
+      const staleOnly = await ctx.storage.listTestCases(scope, p.id, { isStale: true }, { limit: 50 });
+      expect(staleOnly.items.map((i) => i.id)).toEqual([machineDriftStale.id]);
+      const notStale = await ctx.storage.listTestCases(scope, p.id, { isStale: false }, { limit: 50 });
+      expect(notStale.items.some((i) => i.id === machineDriftStale.id)).toBe(false);
+
+      // target 部分一致 + LIKE メタ文字(%, _)エスケープ: エスケープが効いていなければ
+      // ワイルドカードとして働き、xxxNoPercent/xxxNoUnderscore まで誤って一致してしまう
+      const percentMatch = await ctx.storage.listTestCases(scope, p.id, { target: '100%Cov' }, { limit: 50 });
+      expect(percentMatch.items.map((i) => i.id)).toEqual([targetPercent.id]);
+      const underscoreMatch = await ctx.storage.listTestCases(scope, p.id, { target: 'A_B_Te' }, { limit: 50 });
+      expect(underscoreMatch.items.map((i) => i.id)).toEqual([targetUnderscore.id]);
+
+      // AND 結合: status + ownership + target
+      const combined = await ctx.storage.listTestCases(
+        scope, p.id, { status: 'draft', ownership: 'human', target: '100%Cov' }, { limit: 50 },
+      );
+      expect(combined.items.map((i) => i.id)).toEqual([targetPercent.id]);
+    });
+
+    it(
+      'testcases: listTestCases は limit+1件フェッチで has_more を判定し、created_at DESC, id DESC' +
+        '(同時刻は id タイブレーク)で安定ページングする。total は全ページで不変。不正なカーソルは先頭からになる',
+      async () => {
+        const p = await ctx.storage.createProject(scope, { name: 'proj-page' }, now);
+
+        // p1/p2 は created_at が同一(tie-break検証のため)。p3 は1ms後(常に先頭に来る)。
+        const p1 = await ctx.storage.createTestCaseManual(scope, p.id, tcInput({ title: 'p1' }), historyEntry(), now);
+        const p2 = await ctx.storage.createTestCaseManual(scope, p.id, tcInput({ title: 'p2' }), historyEntry(), now);
+        const p3 = await ctx.storage.createTestCaseManual(scope, p.id, tcInput({ title: 'p3' }), historyEntry(), now + 1);
+
+        // 期待順: created_at DESC(p3が先頭)、同時刻の2件は id DESC で決定的に並べる
+        const tieBreakOrder = [p1, p2].sort((a, b) => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+        const expectedOrder = [p3, ...tieBreakOrder];
+
+        const page1 = await ctx.storage.listTestCases(scope, p.id, {}, { limit: 2 });
+        expect(page1.total).toBe(3);
+        expect(page1.hasMore).toBe(true);
+        expect(page1.items.map((i) => i.id)).toEqual([expectedOrder[0]!.id, expectedOrder[1]!.id]);
+        expect(page1.nextCursor).not.toBeNull();
+
+        const page2 = await ctx.storage.listTestCases(scope, p.id, {}, { limit: 2, cursor: page1.nextCursor! });
+        expect(page2.total).toBe(3); // 同フィルタなら total はページを跨いで不変(D-03)
+        expect(page2.hasMore).toBe(false);
+        expect(page2.nextCursor).toBeNull();
+        expect(page2.items.map((i) => i.id)).toEqual([expectedOrder[2]!.id]);
+
+        // 重複無し: 2ページ分を合算するとちょうど3件が1回ずつ登場する
+        const allIds = [...page1.items, ...page2.items].map((i) => i.id);
+        expect(new Set(allIds).size).toBe(3);
+        expect(allIds.sort()).toEqual([p1.id, p2.id, p3.id].sort());
+
+        // 不正なカーソルは decodeCursor が null を返す契約により「先頭から」にフォールバックする
+        const malformed = await ctx.storage.listTestCases(scope, p.id, {}, { limit: 2, cursor: 'not-a-valid-cursor!!' });
+        expect(malformed.items.map((i) => i.id)).toEqual([expectedOrder[0]!.id, expectedOrder[1]!.id]);
+      },
+    );
+
+    it('testcases: getTestCase は他 project の id なら null(project 境界)', async () => {
+      const p1 = await ctx.storage.createProject(scope, { name: 'proj-a' }, now);
+      const p2 = await ctx.storage.createProject(scope, { name: 'proj-b' }, now);
+      const created = await ctx.storage.createTestCaseManual(scope, p1.id, tcInput(), historyEntry(), now);
+
+      expect((await ctx.storage.getTestCase(scope, p1.id, created.id))?.id).toBe(created.id);
+      expect(await ctx.storage.getTestCase(scope, p2.id, created.id)).toBeNull();
+    });
+
+    it('testcases: listHistory の actorDisplay は user.display_name / api_token.name に解決し、存在しない actor は生値のまま返す(D-04)', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-hist' }, now);
+      const user = await ctx.storage.createUser(scope, {
+        email: 'resolver@example.com', passwordHash: 'h', displayName: '田中太郎', role: 'editor', now,
+      });
+      const userId = (user as any).id as string;
+      const token = await ctx.storage.createApiToken(scope, p.id, 'discovery-ci', 'HASHX', now);
+
+      const byUser = await ctx.storage.createTestCaseManual(
+        scope, p.id, tcInput({ title: 'by-user' }), historyEntry({ actor: `user:${userId}` }), now,
+      );
+      const byToken = await ctx.storage.createTestCaseManual(
+        scope, p.id, tcInput({ title: 'by-token' }), historyEntry({ actor: `token:${token.id}` }), now,
+      );
+      const byUnknown = await ctx.storage.createTestCaseManual(
+        scope, p.id, tcInput({ title: 'by-unknown' }),
+        historyEntry({ actor: 'user:00000000-0000-0000-0000-000000000000' }), now,
+      );
+
+      const h1 = await ctx.storage.listHistory(scope, p.id, byUser.id, { limit: 10 });
+      expect(h1.items[0]?.actorDisplay).toBe('田中太郎');
+
+      const h2 = await ctx.storage.listHistory(scope, p.id, byToken.id, { limit: 10 });
+      expect(h2.items[0]?.actorDisplay).toBe('discovery-ci');
+
+      const h3 = await ctx.storage.listHistory(scope, p.id, byUnknown.id, { limit: 10 });
+      expect(h3.items[0]?.actorDisplay).toBe('user:00000000-0000-0000-0000-000000000000');
+      expect(h3.total).toBe(1);
+      expect(h3.hasMore).toBe(false);
+      expect(h3.nextCursor).toBeNull();
     });
   });
 }
