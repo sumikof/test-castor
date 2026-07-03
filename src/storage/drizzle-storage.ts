@@ -15,6 +15,16 @@ export interface StorageDriver {
 }
 const uuid = () => crypto.randomUUID();
 
+// 非同期ドライバ(libSQL/D1)は実エラーを DrizzleQueryError でラップし、元のメッセージは
+// e.cause 側に退避される(better-sqlite3 は同期実行のため生のドライバエラーを直接投げる)。
+// cause チェーンを辿ることで 3 アダプタ共通のポータブルな一意制約違反判定にする。
+function isUniqueViolation(e: unknown): boolean {
+  for (let err: unknown = e; err; err = (err as { cause?: unknown }).cause) {
+    if (String((err as Error).message ?? err).includes('UNIQUE')) return true;
+  }
+  return false;
+}
+
 export function createDrizzleStorage(driver: StorageDriver): Storage {
   const { db } = driver;
 
@@ -59,8 +69,8 @@ export function createDrizzleStorage(driver: StorageDriver): Storage {
       };
       try {
         await db.insert(users).values(row).run();
-      } catch (e: any) {
-        if (String(e?.message ?? e).includes('UNIQUE')) return 'email_taken';
+      } catch (e: unknown) {
+        if (isUniqueViolation(e)) return 'email_taken';
         throw e;
       }
       return row as any;

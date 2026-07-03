@@ -99,13 +99,14 @@ export function runStorageContract(name: string, factory: () => Promise<Contract
       expect(row2?.lastUsedAt).toBe(now + 62_000);
     });
 
-    it('UPDATE...LIMIT / DELETE...LIMIT が動作する(operations.md §1.3 移植互換)', async () => {
+    // 素の UPDATE/DELETE...LIMIT は SQLITE_ENABLE_UPDATE_DELETE_LIMIT 無効ビルド(libSQL等)で動かない。本プロジェクトの標準はこの rowid サブクエリパターン(T16 commit窓 / T22 パージで使用)。
+    it('バッチ限定 UPDATE/DELETE(rowidサブクエリ・LIMIT)が全アダプタで動作する(operations.md §1.3 移植互換)', async () => {
       const admin = (await ctx.storage.findUserForLogin('admin@example.com'))!;
       for (let i = 0; i < 3; i++) {
         await ctx.storage.createSession({ id: `L${i}`, userId: admin.id, expiresAt: now, createdAt: now });
       }
-      await ctx.rawExec(`UPDATE sessions SET expires_at = 1 WHERE user_id = '${admin.id}' LIMIT 2`);
-      await ctx.rawExec(`DELETE FROM sessions WHERE expires_at = 1 LIMIT 2`);
+      await ctx.rawExec(`UPDATE sessions SET expires_at = 1 WHERE rowid IN (SELECT rowid FROM sessions WHERE user_id = '${admin.id}' LIMIT 2)`);
+      await ctx.rawExec(`DELETE FROM sessions WHERE rowid IN (SELECT rowid FROM sessions WHERE expires_at = 1 LIMIT 2)`);
     });
   });
 }
