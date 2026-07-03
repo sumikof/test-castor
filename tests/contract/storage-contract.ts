@@ -949,5 +949,210 @@ export function runStorageContract(name: string, factory: () => Promise<Contract
       ]));
       expect(result).toHaveLength(2);
     });
+
+    // task-16-brief.md「Step 1: 契約テスト追記」
+    const IDENTITY_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+    function commitParams(overrides: Partial<{ now: number; identityTtlMs: number; windowLimit: number; actor: string }> = {}) {
+      return { now, identityTtlMs: IDENTITY_TTL_MS, windowLimit: 1000, actor: 'token:tok-actor', ...overrides };
+    }
+    /** more:true の間 syncCommitWindow を呼び続けて収束させる(無限ループ防止に上限を設ける)。 */
+    async function runCommitToConvergence(
+      s: Storage, sc: { organizationId: string }, pid: string, token: string,
+      params: { now: number; identityTtlMs: number; windowLimit: number; actor: string },
+    ): Promise<number> {
+      let more = true;
+      let iterations = 0;
+      while (more) {
+        iterations++;
+        if (iterations > 200) throw new Error('runCommitToConvergence: exceeded safety cap(200) — possible livelock');
+        const result = await s.syncCommitWindow(sc, pid, token, { ...params, now: params.now + iterations });
+        more = result.more;
+      }
+      return iterations;
+    }
+
+    it('sync commit: 工程0(同定採番)はクラッシュ再開でも同一 UUID に収束し、canonical/history が重複しない', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-commit-uuid' }, now);
+      const started = await ctx.storage.syncStart(scope, p.id, { token: 'tok-uuid', origin: 'discovery-v1', now, slidingMs: 600_000 });
+      if (started.kind !== 'created') throw new Error('unreachable');
+      await ctx.storage.syncAppendObservations(
+        scope, p.id, started.session, [chunkObs({ externalRef: 'ext-uuid-1', fingerprint: 'fp-uuid-1' })], now + 1,
+      );
+
+      await ctx.storage.syncCommitWindow(scope, p.id, 'tok-uuid', commitParams({ now: now + 2 }));
+      const mappingsAfterFirst = await ctx.storage.syncMappings(scope, p.id, 'tok-uuid');
+      const firstId = mappingsAfterFirst.find((m) => m.externalRef === 'ext-uuid-1')?.testCaseId;
+      expect(firstId).toBeTruthy();
+
+      // 再実行(クラッシュ再開を模す): 工程0(sync_staging への ON CONFLICT DO NOTHING)は同一 id に収束する
+      await ctx.storage.syncCommitWindow(scope, p.id, 'tok-uuid', commitParams({ now: now + 3 }));
+      const mappingsAfterSecond = await ctx.storage.syncMappings(scope, p.id, 'tok-uuid');
+      const secondId = mappingsAfterSecond.find((m) => m.externalRef === 'ext-uuid-1')?.testCaseId;
+      expect(secondId).toBe(firstId);
+
+      // canonical/history が重複していない証拠(imported は必ず1件のみ)
+      const history = await ctx.storage.listHistory(scope, p.id, firstId!, { limit: 50 });
+      expect(history.items.filter((h) => h.action === 'imported')).toHaveLength(1);
+      expect(history.total).toBe(1);
+    });
+
+    it(
+      'sync commit: syncCommitWindow は windowLimit を超える作業がある間 more:true を返し、再呼び出しで収束する' +
+        '(結果は一括実行(大きい windowLimit)と一致する)',
+      async () => {
+        const p = await ctx.storage.createProject(scope, { name: 'proj-commit-window' }, now);
+
+        const started = await ctx.storage.syncStart(scope, p.id, { token: 'tok-window', origin: 'discovery-v1', now, slidingMs: 600_000 });
+        if (started.kind !== 'created') throw new Error('unreachable');
+        const obsList = Array.from({ length: 5 }, (_, i) => chunkObs({ externalRef: `ext-window-${i}`, fingerprint: `fp-window-${i}` }));
+        await ctx.storage.syncAppendObservations(scope, p.id, started.session, obsList, now + 1);
+
+        const iterations = await runCommitToConvergence(
+          ctx.storage, scope, p.id, 'tok-window', commitParams({ now: now + 2, windowLimit: 1 }),
+        );
+        expect(iterations).toBeGreaterThan(1); // windowLimit=1 なら複数回の呼び出しに分かれるはず
+
+        const finalized = await ctx.storage.syncFinalize(scope, p.id, 'tok-window', now + 500);
+        expect(finalized.alreadyCommitted).toBe(false);
+        expect(finalized.createdCount).toBe(5);
+        expect(finalized.changedCount).toBe(5);
+        expect(finalized.staledCount).toBe(0);
+
+        // 一括実行(大きい windowLimit・別 origin で並行)と結果が一致することを確認
+        const started2 = await ctx.storage.syncStart(
+          scope, p.id, { token: 'tok-window-oneshot', origin: 'selfheal-v1', now: now + 600, slidingMs: 600_000 },
+        );
+        if (started2.kind !== 'created') throw new Error('unreachable');
+        const obsList2 = Array.from({ length: 5 }, (_, i) => chunkObs({ externalRef: `ext-oneshot-${i}`, fingerprint: `fp-oneshot-${i}` }));
+        await ctx.storage.syncAppendObservations(scope, p.id, started2.session, obsList2, now + 601);
+        const oneShotIterations = await runCommitToConvergence(
+          ctx.storage, scope, p.id, 'tok-window-oneshot', commitParams({ now: now + 602, windowLimit: 1000 }),
+        );
+        expect(oneShotIterations).toBe(1); // 大きい windowLimit なら1回で収束する
+
+        const finalized2 = await ctx.storage.syncFinalize(scope, p.id, 'tok-window-oneshot', now + 700);
+        expect(finalized2.createdCount).toBe(finalized.createdCount);
+        expect(finalized2.changedCount).toBe(finalized.changedCount);
+        expect(finalized2.staledCount).toBe(finalized.staledCount);
+      },
+      20_000,
+    );
+
+    it('sync commit: syncFinalize は冪等(2回目は再計算せず alreadyCommitted:true で保存済みカウントを返す)', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-finalize-idem' }, now);
+      const started = await ctx.storage.syncStart(scope, p.id, { token: 'tok-finalize', origin: 'discovery-v1', now, slidingMs: 600_000 });
+      if (started.kind !== 'created') throw new Error('unreachable');
+      await ctx.storage.syncAppendObservations(
+        scope, p.id, started.session, [chunkObs({ externalRef: 'ext-finalize-1', fingerprint: 'fp-finalize-1' })], now + 1,
+      );
+      await runCommitToConvergence(ctx.storage, scope, p.id, 'tok-finalize', commitParams({ now: now + 2 }));
+
+      const first = await ctx.storage.syncFinalize(scope, p.id, 'tok-finalize', now + 100);
+      expect(first.alreadyCommitted).toBe(false);
+      expect(first.createdCount).toBe(1);
+      expect(first.changedCount).toBe(1);
+      expect(first.staledCount).toBe(0);
+
+      const second = await ctx.storage.syncFinalize(scope, p.id, 'tok-finalize', now + 200);
+      expect(second).toEqual({ ...first, alreadyCommitted: true });
+
+      const session = await ctx.storage.syncGetSession(scope, p.id, 'tok-finalize');
+      expect(session?.status).toBe('committed');
+      expect(session?.createdCount).toBe(1);
+      expect(session?.committedAt).toBe(now + 100); // 2回目の呼び出し(now+200)では上書きされない
+    });
+
+    it('sync commit: syncMappings は created(staging)/updated(観測(:T)有り・staging除く)/unchanged(sync_seenのみ)を判別する', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-mappings' }, now);
+
+      // セッション1: ref A・ref C を新規作成して commit(以後の「既存 identity」の下地)
+      const s1 = await ctx.storage.syncStart(scope, p.id, { token: 'tok-map-1', origin: 'discovery-v1', now, slidingMs: 600_000 });
+      if (s1.kind !== 'created') throw new Error('unreachable');
+      await ctx.storage.syncAppendObservations(scope, p.id, s1.session, [
+        chunkObs({ externalRef: 'ext-map-a', fingerprint: 'fp-a-1' }),
+        chunkObs({ externalRef: 'ext-map-c', fingerprint: 'fp-c-1' }),
+      ], now + 1);
+      await runCommitToConvergence(ctx.storage, scope, p.id, 'tok-map-1', commitParams({ now: now + 2 }));
+      await ctx.storage.syncFinalize(scope, p.id, 'tok-map-1', now + 3);
+
+      // セッション2: ref A は新指紋(updated)・ref B は新規(created)・ref C は同一指紋を再送(unchanged)
+      const s2 = await ctx.storage.syncStart(
+        scope, p.id, { token: 'tok-map-2', origin: 'discovery-v1', now: now + 10, slidingMs: 600_000 },
+      );
+      if (s2.kind !== 'created') throw new Error('unreachable');
+      await ctx.storage.syncAppendObservations(scope, p.id, s2.session, [
+        chunkObs({ externalRef: 'ext-map-a', fingerprint: 'fp-a-2' }),
+        chunkObs({ externalRef: 'ext-map-b', fingerprint: 'fp-b-1' }),
+        chunkObs({ externalRef: 'ext-map-c', fingerprint: 'fp-c-1' }), // 同一指紋 → 観測行は作られない(duplicate)
+      ], now + 11);
+      await runCommitToConvergence(ctx.storage, scope, p.id, 'tok-map-2', commitParams({ now: now + 12 }));
+
+      const mappings = await ctx.storage.syncMappings(scope, p.id, 'tok-map-2');
+      const byRef = new Map(mappings.map((m) => [m.externalRef, m.outcome]));
+      expect(byRef.get('ext-map-a')).toBe('updated');
+      expect(byRef.get('ext-map-b')).toBe('created');
+      expect(byRef.get('ext-map-c')).toBe('unchanged');
+      expect(mappings).toHaveLength(3);
+    });
+
+    // self-review(GC-1 突合中に発見・修正): 工程5(ミラー)の「最新観測」相関サブクエリは external_ref
+    // 文字列の一致だけで observation を拾うと、別 origin が偶然同じ external_ref 文字列を使っていた
+    // 場合に他 origin の観測が混入しうる(external_ref は origin ごとにのみ一意。data-model.md
+    // 「一意制約」)。origin A が同一指紋を再送(無変化)しても、より新しい origin B の観測に
+    // 巻き込まれて誤ってミラーされないことを確認する回帰テスト。
+    it(
+      '工程5(ミラー)は observation 自身の origin も突き合わせる: 別 origin が同一 external_ref 文字列を' +
+        '使い、かつその観測がより新しくても、混線して誤ミラーされない',
+      async () => {
+        const p = await ctx.storage.createProject(scope, { name: 'proj-mirror-origin-clash' }, now);
+
+        // origin A: 'clash' を fp-a-1 で新規作成 → commit(canonical X が fp-a-1/'A1' でミラーされる)
+        const sA = await ctx.storage.syncStart(scope, p.id, { token: 'tok-clash-a1', origin: 'discovery-v1', now, slidingMs: 600_000 });
+        if (sA.kind !== 'created') throw new Error('unreachable');
+        await ctx.storage.syncAppendObservations(
+          scope, p.id, sA.session,
+          [chunkObs({ externalRef: 'clash', fingerprint: 'fp-a-1', observed: { title: 'A1', given: 'g', when: 'w', then: 'th', parameters: [], source_ref: {}, schema_version: '1.0' } })],
+          now + 1,
+        );
+        await runCommitToConvergence(ctx.storage, scope, p.id, 'tok-clash-a1', commitParams({ now: now + 2 }));
+        const mappingsA1 = await ctx.storage.syncMappings(scope, p.id, 'tok-clash-a1');
+        const canonicalX = mappingsA1.find((m) => m.externalRef === 'clash')!.testCaseId;
+        // finalize して active→committed に遷移させる(uq_active_session が同一 origin の
+        // 次の syncStart をブロックしないようにするため)。
+        await ctx.storage.syncFinalize(scope, p.id, 'tok-clash-a1', now + 3);
+
+        // origin B: 同じ文字列 'clash' を(より新しい時刻で)fp-b-1 で新規作成 → commit
+        // (canonical Y が別途作られる。X には触れないはず)
+        const sB = await ctx.storage.syncStart(scope, p.id, { token: 'tok-clash-b1', origin: 'selfheal-v1', now: now + 100, slidingMs: 600_000 });
+        if (sB.kind !== 'created') throw new Error('unreachable');
+        await ctx.storage.syncAppendObservations(
+          scope, p.id, sB.session,
+          [chunkObs({ externalRef: 'clash', fingerprint: 'fp-b-1', observed: { title: 'B1', given: 'g', when: 'w', then: 'th', parameters: [], source_ref: {}, schema_version: '1.0' } })],
+          now + 101,
+        );
+        await runCommitToConvergence(ctx.storage, scope, p.id, 'tok-clash-b1', commitParams({ now: now + 102 }));
+        // finalize して committed にする(committed-JOIN フェンスの「committed」枝から見えるようにする。
+        // これをしないと origin B の観測は tok-clash-a2 のフェンスから元々不可視になり、
+        // このテストが混線バグを検出できなくなる)。
+        await ctx.storage.syncFinalize(scope, p.id, 'tok-clash-b1', now + 103);
+
+        // origin A: 'clash' を同一指紋(fp-a-1)で再送(無変化)→ commit。
+        // origin B の観測(now+101)の方が origin A 自身の観測(now+1)より新しいため、
+        // もし工程5のサブクエリが o.origin を見ていなければ、origin B の 'B1'/fp-b-1 を
+        // 「origin A の最新観測」として誤って取り込み、X が書き換わってしまう。
+        const sA2 = await ctx.storage.syncStart(scope, p.id, { token: 'tok-clash-a2', origin: 'discovery-v1', now: now + 200, slidingMs: 600_000 });
+        if (sA2.kind !== 'created') throw new Error('unreachable');
+        await ctx.storage.syncAppendObservations(
+          scope, p.id, sA2.session,
+          [chunkObs({ externalRef: 'clash', fingerprint: 'fp-a-1', observed: { title: 'A1', given: 'g', when: 'w', then: 'th', parameters: [], source_ref: {}, schema_version: '1.0' } })],
+          now + 201,
+        );
+        await runCommitToConvergence(ctx.storage, scope, p.id, 'tok-clash-a2', commitParams({ now: now + 202 }));
+
+        const xAfter = await ctx.storage.getTestCase(scope, p.id, canonicalX);
+        expect(xAfter?.title).toBe('A1'); // origin B の 'B1' に汚染されていない
+        expect(xAfter?.fingerprint).toBe('fp-a-1'); // origin B の fp-b-1 に汚染されていない
+      },
+    );
   });
 }

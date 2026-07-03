@@ -23,6 +23,7 @@ describe('http/config: loadConfig', () => {
     expect(cfg.syncRateLimit).toEqual({ windowMs: 60_000, max: 120 }); // D-14
     expect(cfg.observationRetentionMs).toBe(90 * DAY_MS);
     expect(cfg.identityTtlMs).toBe(90 * DAY_MS);
+    expect(cfg.commitWindowLimit).toBe(500); // task-16-brief.md: MAX_CHUNK_SIZE と同水準
   });
 
   it('SESSION_SIGNING_KEYS 未設定: devフォールバック{"dev":"dev-insecure-key"}を使い console.warn する', () => {
@@ -126,6 +127,12 @@ describe('http/config: loadConfig', () => {
     const cfg = loadConfig({ OBSERVATION_RETENTION_MS: '111', IDENTITY_TTL_MS: '222' });
     expect(cfg.observationRetentionMs).toBe(111);
     expect(cfg.identityTtlMs).toBe(222);
+  });
+
+  it('SYNC_COMMIT_WINDOW_LIMIT env override(task-16-brief.md syncCommitWindow の windowLimit 既定値)', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const cfg = loadConfig({ SYNC_COMMIT_WINDOW_LIMIT: '7' });
+    expect(cfg.commitWindowLimit).toBe(7);
   });
 
   it('不正な数値文字列(NaNになる)は既定値にフォールバックする', () => {

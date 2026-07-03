@@ -19,7 +19,7 @@ function testConfig(): AppDeps['config'] {
   return {
     sessionTtlMs: 604_800_000, signingKeys: { k1: 's' }, activeKeyId: 'k1', pbkdf2Iterations: 1000,
     loginRateLimit: { windowMs: 900_000, max: 5 }, syncRateLimit: { windowMs: 60_000, max: 120 },
-    observationRetentionMs: 7_776_000_000, identityTtlMs: 7_776_000_000,
+    observationRetentionMs: 7_776_000_000, identityTtlMs: 7_776_000_000, commitWindowLimit: 500,
   };
 }
 function allowAll() { return { limit: async () => ({ allowed: true }) } };

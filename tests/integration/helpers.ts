@@ -10,7 +10,7 @@ import type { Storage } from '../../src/storage/interface';
 import { createD1Storage } from '../../src/storage/adapters/d1';
 import { createWebcryptoAuth } from '../../src/auth/webcrypto-auth';
 import { createMemoryRateLimiter } from '../../src/ratelimit/memory';
-import { loadConfig } from '../../src/http/config';
+import { loadConfig, type AppConfig } from '../../src/http/config';
 import { CSRF_COOKIE } from '../../src/http/middleware/csrf';
 
 /** 全テストの起点クロック値(既存テスト群と同じ規約に合わせる)。 */
@@ -50,14 +50,21 @@ export interface TestApp {
  * テスト専用に低イテレーション(1000)の Auth インスタンスを直接構築する(config.pbkdf2Iterations は
  * loadConfig の既定値(600,000)のままで構わない — 実行時に config から Auth を再構築する経路は
  * entry/workers.ts 側の責務であり、本ハーネスは deps.auth を直接注入するためこの値は参照されない)。
+ *
+ * configOverrides(task-16-brief.md): 既定の loadConfig 出力を部分的に上書きできる(例: commit の
+ * mid-commit 再開シナリオで `commitWindowLimit` を小さい値に注入する)。全既存呼び出し元
+ * (`makeTestApp()` 引数無し)は本パラメータ追加前と完全に同一の挙動のまま。
  */
-export async function makeTestApp(): Promise<TestApp> {
+export async function makeTestApp(configOverrides: Partial<AppConfig> = {}): Promise<TestApp> {
   const { storage, rawExec } = createD1Storage(env.DB);
   let now = FIXED_NOW;
   const clock = () => now;
 
   const auth = createWebcryptoAuth({ signingKeys: { k1: 'test' }, activeKeyId: 'k1', pbkdf2Iterations: 1000 });
-  const config = loadConfig({ SESSION_SIGNING_KEYS: JSON.stringify({ k1: 'test' }), SESSION_ACTIVE_KEY_ID: 'k1' });
+  const config = {
+    ...loadConfig({ SESSION_SIGNING_KEYS: JSON.stringify({ k1: 'test' }), SESSION_ACTIVE_KEY_ID: 'k1' }),
+    ...configOverrides,
+  };
   const loginLimiter = createMemoryRateLimiter(config.loginRateLimit, clock);
   const syncLimiter = createMemoryRateLimiter(config.syncRateLimit, clock);
 

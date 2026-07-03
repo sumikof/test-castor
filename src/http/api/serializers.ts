@@ -8,6 +8,7 @@ import type {
   UserRow, OrganizationRow, ProjectRow, ApiTokenRow, TestCaseRow, TestCaseHistoryRow,
   TestCaseIdentityRow, TestCaseObservationRow,
 } from '../../storage/schema';
+import type { SyncMappingItem, SyncStatusResult } from '../../storage/interface';
 import { structuredDiff, type GwtP } from '../../domain/diff';
 
 /** apis/users.md(Task 9以降)向けの完全形。last_login_at(D-05)を含む。 */
@@ -207,6 +208,26 @@ export function toDiffJson(tc: TestCaseRow, latestObservation: TestCaseObservati
     canonical,
     latest_observation: latestObservationGwtp,
     diff: structuredDiff(canonical, latestObservationGwtp),
+  };
+}
+
+/**
+ * sync-protocol.md「POST /sync/:token/commit」レスポンスの `mappings` 1件分
+ * (task-16-brief.md「syncMappings」の外部形。staled は含まない。syncFinalize の staled_count で報告)。
+ */
+export function toSyncMappingJson(item: SyncMappingItem) {
+  return { external_ref: item.externalRef, test_case_id: item.testCaseId, outcome: item.outcome };
+}
+
+/** GET /sync/status(スペック D-01)。 */
+export function toSyncStatusJson(result: SyncStatusResult) {
+  return {
+    origins: result.origins.map((o) => ({
+      origin: o.origin,
+      last_committed_at: o.lastCommittedAt,
+      last_summary: o.lastSummary,
+    })),
+    current: result.current,
   };
 }
 

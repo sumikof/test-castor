@@ -27,8 +27,11 @@ import { zodHook } from '../middleware/error';
 import { requireAuth } from '../middleware/authn';
 import { resolveProject, orgScopeOf } from '../middleware/scope';
 import { syncStartInput, syncChunkInput, MAX_CHUNK_SIZE } from '../../schemas/sync';
+import { toSyncMappingJson, toSyncStatusJson } from './serializers';
 
 const tokenOnly = requireAuth({ modes: ['token'] });
+// GET /sync/status(スペック D-01): session|token・viewer 以上(apis/testcases.md の GET 系と同じ能力)。
+const viewerUp = requireAuth({ modes: ['session', 'token'], minRole: 'viewer' });
 
 /** sync-protocol.md「スライディング失効モデル」: chunk/commit のたびに expires_at を now+10分へ延長。 */
 const SLIDING_MS = 10 * 60_000;
@@ -145,5 +148,90 @@ export const syncRoutes = new Hono<AppEnv>()
       const received = await deps.storage.syncAppendObservations(scope, pid, session, chunkObs, now);
 
       return c.json({ accepted: received.length, received }, 200);
+    },
+  )
+
+  // task-16-brief.md「commit ルートの流れ」: 遅延評価(期限切れ→expired)→ セッション検証
+  // (無し/expired → 410、committed → 保存済みカウント+mappings で200即応)→ スライディング延長 →
+  // syncCommitWindow(more:true なら202、more:false なら syncFinalize→syncMappings→200)。
+  .post(
+    '/:pid/sync/:token/commit',
+    tokenOnly,
+    syncRateLimit(),
+    resolveProject(),
+    async (c) => {
+      const deps = c.get('deps');
+      const actor = c.get('actor');
+      // tokenOnly は modes:['token'] のため token actor 以外はここへ到達しない(型上のナローイングのみ。
+      // testcases.ts の editorOnly ハンドラと同じ流儀)。
+      if (actor.kind !== 'token') throw new AppError('UNAUTHORIZED', 401, 'authentication required');
+      const scope = orgScopeOf(actor);
+      const pid = c.get('project').id;
+      const token = c.req.param('token');
+      const now = deps.now();
+
+      const session = await deps.storage.syncGetSession(scope, pid, token);
+      if (!session) throw new AppError('SESSION_EXPIRED', 410, 'sync session not found or expired');
+
+      // 遅延評価(sync-protocol.md「失効の執行モデル(プライマリ)」): chunk と同じパターン。
+      if (session.status === 'active' && session.expiresAt <= now) {
+        await deps.storage.syncExpireLapsed(scope, pid, session.origin, now);
+        throw new AppError('SESSION_EXPIRED', 410, 'sync session expired');
+      }
+
+      // committed 済みへの再送は冪等な即応(sync-protocol.md「commit は完全に冪等」)。保存済みカウント
+      // (syncFinalize の alreadyCommitted 経路)+ mappings を並べて 200 で返す。スライディング延長は
+      // 行わない(committed セッションの expires_at は以後意味を持たない)。
+      if (session.status === 'committed') {
+        const finalized = await deps.storage.syncFinalize(scope, pid, token, now);
+        const mappings = await deps.storage.syncMappings(scope, pid, token);
+        return c.json({
+          status: 'completed',
+          staled_count: finalized.staledCount,
+          more: false,
+          mappings: mappings.map(toSyncMappingJson),
+        }, 200);
+      }
+      if (session.status !== 'active') {
+        throw new AppError('SESSION_EXPIRED', 410, 'sync session is not active');
+      }
+
+      // スライディング失効: 正常なリクエストのたびに expires_at を now+10分へ延長する。
+      await deps.storage.syncTouchExpiry(token, now + SLIDING_MS);
+
+      const windowResult = await deps.storage.syncCommitWindow(scope, pid, token, {
+        now,
+        identityTtlMs: deps.config.identityTtlMs,
+        windowLimit: deps.config.commitWindowLimit,
+        actor: `token:${actor.token.id}`,
+      });
+
+      if (windowResult.more) {
+        // 大規模セットの分割実行(sync-protocol.md「大規模セットの分割実行」): 同一トークンで再送させる。
+        return c.json({ status: 'in_progress', more: true }, 202);
+      }
+
+      const finalized = await deps.storage.syncFinalize(scope, pid, token, now);
+      const mappings = await deps.storage.syncMappings(scope, pid, token);
+      return c.json({
+        status: 'completed',
+        staled_count: finalized.staledCount,
+        more: false,
+        mappings: mappings.map(toSyncMappingJson),
+      }, 200);
+    },
+  )
+
+  // スペック D-01: GET /sync/status(session|token・viewer 以上)。
+  .get(
+    '/:pid/sync/status',
+    viewerUp,
+    resolveProject(),
+    async (c) => {
+      const deps = c.get('deps');
+      const scope = orgScopeOf(c.get('actor'));
+      const pid = c.get('project').id;
+      const result = await deps.storage.syncStatus(scope, pid);
+      return c.json(toSyncStatusJson(result));
     },
   );

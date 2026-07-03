@@ -18,6 +18,14 @@ export interface AppConfig {
   syncRateLimit: { windowMs: number; max: number };
   observationRetentionMs: number;
   identityTtlMs: number;
+  /**
+   * task-16-brief.md「syncCommitWindow」の windowLimit 既定値(工程3〜7 の rowid ウィンドウ幅)。
+   * ブリーフの Storage インターフェース原文は呼び出し時の引数として windowLimit を渡す形だが、
+   * 実際に値を決めて注入する場所(HTTP ルート)が必要なため config に追加した(タスク報告に明記)。
+   * MAX_CHUNK_SIZE(sync-protocol.md「1 chunk ≤500 観測」)と同水準にし、典型的な同期が1回の
+   * commit 呼び出しで収束するようにする。テストは mid-commit 再開を検証するためこれより小さい値を注入する。
+   */
+  commitWindowLimit: number;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -30,6 +38,7 @@ const DEFAULTS = {
   syncRateLimitMax: 120, // D-14: 120リクエスト
   observationRetentionMs: 90 * DAY_MS,
   identityTtlMs: 90 * DAY_MS, // rollup TTL
+  commitWindowLimit: 500, // MAX_CHUNK_SIZE と同水準(schemas/sync.ts)
 };
 
 /** env 文字列を正の整数として解釈する。未設定・非数値・0以下はすべて fallback を返す(起動を壊さない)。 */
@@ -144,5 +153,6 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     },
     observationRetentionMs: parsePositiveInt(env.OBSERVATION_RETENTION_MS, DEFAULTS.observationRetentionMs),
     identityTtlMs: parsePositiveInt(env.IDENTITY_TTL_MS, DEFAULTS.identityTtlMs),
+    commitWindowLimit: parsePositiveInt(env.SYNC_COMMIT_WINDOW_LIMIT, DEFAULTS.commitWindowLimit),
   };
 }

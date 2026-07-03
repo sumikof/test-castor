@@ -1,18 +1,20 @@
 // src/storage/drizzle-storage.ts
-import { and, eq, ne, isNull, count, desc, sql, inArray } from 'drizzle-orm';
+import { and, eq, ne, isNull, count, desc, sql, inArray, type SQL } from 'drizzle-orm';
 import {
   organizations, users, sessions, projects, apiTokens, testCases, testCaseHistory,
-  testCaseIdentities, testCaseObservations, syncSessions, syncSeen,
-  type SessionRow, type TestCaseRow, type SyncSessionRow,
+  testCaseIdentities, testCaseObservations, syncSessions, syncSeen, syncStaging,
+  type SessionRow, type TestCaseRow, type SyncSessionRow, type SyncStagingRow,
 } from './schema';
 import type {
   Storage, OrgScope, SetupParams, CreateUserParams,
   TestCaseFilters, Page, NewTestCaseColumns, NewHistoryEntry, ChunkObservation,
+  SyncCommitWindowParams, SyncMappingItem,
 } from './interface';
 import { encodeCursor, decodeCursor } from '../domain/cursor';
 import { applyBulkAction } from '../domain/testcase-rules';
 import { buildHistoryEntries } from '../domain/history-delta';
-import type { Status } from '../schemas/enums';
+import { resolveCanonicalCategory, classifySyncMappings } from '../domain/sync-commit';
+import type { Status, Category } from '../schemas/enums';
 
 // 3アダプタの差(batch/transaction/raw)を吸収する薄いドライバ
 export type AnyQuery = { run(): unknown };
@@ -89,6 +91,66 @@ function toBatches<T>(items: T[], size: number): T[][] {
 // latestFingerprintByRef へマージするだけで、単一クエリ版と同一の結果になる。
 const FENCE_REFS_BATCH_SIZE = 90;
 
+// task-16-brief.md commit 工程0〜2。D1「1文あたり bind ≤ 100」対応の行数/文(列数から逆算。
+// FENCE_REFS_BATCH_SIZE/OBSERVATION_BATCH_ROWS と同じ考え方)。工程0〜2 は windowLimit の対象外
+// (brief「工程3〜7 は...反復し」。工程0〜2 は毎回全件完了させる)ため、ここでのバッチ化は純粋に
+// D1 bind 上限対応であり、mid-commit 再開の「more」判定には影響しない。
+const STAGING_BATCH_ROWS = 20; // sync_staging: 3列(sync_token,external_ref,new_test_case_id) → 60 bind
+const CANONICAL_BATCH_ROWS = 4; // test_cases: 23列 → 92 bind
+const HISTORY_BATCH_ROWS = 16; // test_case_history: 6列 → 96 bind(SEEN_BATCH_ROWSと同水準)
+const IDENTITY_BATCH_ROWS = 10; // test_case_identities: 9列 → 90 bind
+const ID_LOOKUP_BATCH_SIZE = 90; // IN(...) 系の存在チェック(1件1 bind + 固定少数)
+
+/**
+ * sync-protocol.md「committed-JOIN フェンス」: 対象 origin の観測のうち、committed セッション由来
+ * または当セッション自身(:T)由来のみを対象にした「この test_case の最新観測」を返す相関サブクエリ
+ * (工程5/工程6 で共有)。selectExpr は observed の JSON 抽出や fingerprint/confidence など、
+ * 呼び出し側が選びたい列。test_cases.id への相関は、呼び出し側の UPDATE 文(SET句 or WHERE句の
+ * rowid サブクエリ)のどちらに埋め込まれるかによって、それぞれのスコープの test_cases 行に自然に
+ * 束縛される(SQLite の通常のスコープ解決。詳細はタスク報告のクロスチェック参照)。
+ */
+// self-review(GC-1 突合中に発見): sync-protocol.md 工程5 の SQL 例は `JOIN TestCaseIdentity i ON
+// i.external_ref = o.external_ref AND i.origin = :O ...` のみで o.origin 自体は突き合わせていないが、
+// 例のクエリは同時に `WHERE o.sync_token = :T` で1セッション(=1 origin 固定)に絞っているため、
+// o.origin は sync_token 経由で暗黙に :O へピン留めされ、実害が無い。だが本関数は
+// 「committed な全履歴 OR :T」という複数 sync_token 横断のフェンスを張るため、この暗黙の縛りが
+// 効かない。もし別 origin が偶然同じ external_ref 文字列を使っていた場合(external_ref は
+// origin ごとにのみ一意)、o.origin を明示チェックしないと他 origin の観測を誤って「この origin の
+// 最新観測」として混入させてしまう。そのため o.origin = :O(と project_id)を明示的に追加する
+// (ドキュメントの例をそのまま複数セッション横断に一般化する際に必要な安全策。タスク報告に明記)。
+function latestObservationSubquery(pid: string, origin: string, token: string, selectExpr: SQL): SQL {
+  return sql`(
+    SELECT ${selectExpr}
+    FROM test_case_observations o
+    JOIN test_case_identities i ON i.external_ref = o.external_ref AND i.origin = ${origin} AND i.project_id = ${pid}
+    JOIN sync_sessions ss ON ss.token = o.sync_token AND (ss.status = 'committed' OR ss.token = ${token})
+    WHERE i.test_case_id = test_cases.id
+      AND o.origin = ${origin}
+      AND o.project_id = ${pid}
+    ORDER BY o.created_at DESC, o.id DESC
+    LIMIT 1
+  )`;
+}
+
+/**
+ * sync-protocol.md「工程7: Canonical Rollup」の is_stale 集約式(domain/sync-commit.ts の
+ * computeCanonicalIsStale と同一の述語を SQL 化したもの。TTL(identityTtlMs)超の identity は
+ * live 判定から除外される)。
+ */
+function rollupIsStaleExpr(now: number, identityTtlMs: number): SQL {
+  const cutoff = now - identityTtlMs;
+  return sql`(
+    NOT EXISTS (
+      SELECT 1 FROM test_case_identities i
+      WHERE i.test_case_id = test_cases.id AND i.is_stale = 0 AND i.last_seen_at > ${cutoff}
+    )
+    AND EXISTS (
+      SELECT 1 FROM test_case_identities i
+      WHERE i.test_case_id = test_cases.id AND i.last_seen_at > ${cutoff}
+    )
+  )`;
+}
+
 export function createDrizzleStorage(driver: StorageDriver): Storage {
   const { db } = driver;
 
@@ -110,6 +172,43 @@ export function createDrizzleStorage(driver: StorageDriver): Storage {
     const [row] = await db.select().from(testCases)
       .where(and(eq(testCases.id, id), eq(testCases.projectId, pid)));
     return row ?? null;
+  };
+
+  // task-16-brief.md の syncCommitWindow/syncFinalize/syncMappings が origin 解決のため共通で使う
+  // (scope なし。token は認証済み・存在確認済みの PK である前提。syncGetSession と同じ規約)。
+  const getSyncSessionRow = async (pid: string, token: string): Promise<SyncSessionRow | null> => {
+    const [row] = await db.select().from(syncSessions)
+      .where(and(eq(syncSessions.token, token), eq(syncSessions.projectId, pid)));
+    return row ?? null;
+  };
+
+  // 工程1: staging の新規 ref について「観測の category」を解決する(task-16-brief.md 工程実装対応表
+  // 「category=観測の category ?? 'normal'」)。syncAppendObservations の latestFingerprintByRef と
+  // 同じ committed-JOIN フェンス・同じ「最新観測」定義(created_at DESC, id DESC の先頭)を category 列に
+  // 適用する。新規 ref(このセッションで初めて identity が採番される ref)は、定義上まだ一度も
+  // committed になったことが無いため、フェンスは実質的に :T 自身の観測のみに絞られる
+  // (詳細はタスク報告のクロスチェック参照)。
+  const getLatestCategoryByRef = async (
+    pid: string, origin: string, token: string, refs: string[],
+  ): Promise<Map<string, Category | null>> => {
+    const result = new Map<string, Category | null>();
+    for (const batch of toBatches(refs, FENCE_REFS_BATCH_SIZE)) {
+      const rows = await db
+        .select({ externalRef: testCaseObservations.externalRef, category: testCaseObservations.category })
+        .from(testCaseObservations)
+        .innerJoin(syncSessions, eq(syncSessions.token, testCaseObservations.syncToken))
+        .where(and(
+          eq(testCaseObservations.projectId, pid),
+          eq(testCaseObservations.origin, origin),
+          inArray(testCaseObservations.externalRef, batch),
+          sql`(${syncSessions.status} = 'committed' OR ${syncSessions.token} = ${token})`,
+        ))
+        .orderBy(desc(testCaseObservations.createdAt), desc(testCaseObservations.id));
+      for (const r of rows) {
+        if (!result.has(r.externalRef)) result.set(r.externalRef, r.category as Category | null);
+      }
+    }
+    return result;
   };
 
   // data-model.md「drift」の基準列: mirror_origin 由来・committed セッションの最新観測。
@@ -672,9 +771,7 @@ export function createDrizzleStorage(driver: StorageDriver): Storage {
     },
 
     async syncGetSession(scope: OrgScope, pid: string, token: string) {
-      const [row] = await db.select().from(syncSessions)
-        .where(and(eq(syncSessions.token, token), eq(syncSessions.projectId, pid)));
-      return row ?? null;
+      return getSyncSessionRow(pid, token);
     },
 
     // touchTokenLastUsed と同じ規約(GC-5 の追加の例外): token は認証済み・存在確認済みの PK のため
@@ -755,6 +852,369 @@ export function createDrizzleStorage(driver: StorageDriver): Storage {
         external_ref: o.externalRef,
         outcome: (changedRefs.has(o.externalRef) ? 'inserted' : 'duplicate') as 'inserted' | 'duplicate',
       }));
+    },
+
+    // --- sync commit(task-16-brief.md。工程0-8)---
+
+    // sync-protocol.md「Commit 8工程パイプライン」。工程0〜2 は毎回全件を完了させる(D1 bind 上限
+    // 対応のバッチ分割のみ)。工程3〜7 は notes.md 実装標準どおり
+    // `WHERE rowid IN (SELECT rowid FROM ... WHERE <述語> LIMIT :windowLimit)` パターンで1回の
+    // 呼び出しあたり最大 windowLimit 行に限定し、いずれかの工程が実際に windowLimit 行へ到達したら
+    // more:true を返す(呼び出し側が同一トークンで再度呼ぶ)。
+    async syncCommitWindow(scope: OrgScope, pid: string, token: string, p: SyncCommitWindowParams) {
+      const { now, identityTtlMs, windowLimit, actor } = p;
+      const session = await getSyncSessionRow(pid, token);
+      // ルート層が事前にセッションの存在/失効を検証してから呼ぶ契約(sync-protocol.md「commit ルートの
+      // 流れ」)。契約テスト等で直接呼ばれ、かつ session が無い場合は安全側で no-op として扱う。
+      if (!session) return { more: false };
+      const origin = session.origin;
+
+      // --- 工程0: 同定採番(SyncStaging) --- 新規 external_ref(既存 identity が無いもの)を抽出する。
+      // (db: any の select 結果に直接 .map/.filter するとコールバック引数が implicit any になるため、
+      //  以下の await 結果には明示的な行型を注釈する。)
+      const candidateRows: Array<{ externalRef: string }> = await db
+        .select({ externalRef: testCaseObservations.externalRef })
+        .from(testCaseObservations)
+        .where(and(
+          eq(testCaseObservations.projectId, pid),
+          eq(testCaseObservations.origin, origin),
+          eq(testCaseObservations.syncToken, token),
+        ));
+      const candidateRefs = [...new Set(candidateRows.map((r) => r.externalRef))];
+
+      if (candidateRefs.length > 0) {
+        const existingIdentityRefs = new Set<string>();
+        for (const batch of toBatches(candidateRefs, FENCE_REFS_BATCH_SIZE)) {
+          const rows: Array<{ externalRef: string }> = await db
+            .select({ externalRef: testCaseIdentities.externalRef }).from(testCaseIdentities)
+            .where(and(
+              eq(testCaseIdentities.projectId, pid),
+              eq(testCaseIdentities.origin, origin),
+              inArray(testCaseIdentities.externalRef, batch),
+            ));
+          for (const r of rows) existingIdentityRefs.add(r.externalRef);
+        }
+        const newRefs = candidateRefs.filter((r) => !existingIdentityRefs.has(r));
+        if (newRefs.length > 0) {
+          // JS で UUID 採番して INSERT ... ON CONFLICT DO NOTHING(SQLite に uuid() は無いため)。
+          // クラッシュ再開時、既に永続化された行があれば conflict で無視され同一 id に収束する。
+          const stagingRows = newRefs.map((r) => ({ syncToken: token, externalRef: r, newTestCaseId: uuid() }));
+          for (const batch of toBatches(stagingRows, STAGING_BATCH_ROWS)) {
+            await driver.batch([db.insert(syncStaging).values(batch).onConflictDoNothing()]);
+          }
+        }
+      }
+
+      // --- 工程1(Canonical 生成 + history INSERT)・工程2(Identity 生成) ---
+      const stagingAll: SyncStagingRow[] = await db.select().from(syncStaging).where(eq(syncStaging.syncToken, token));
+      if (stagingAll.length > 0) {
+        const allNewIds = stagingAll.map((s) => s.newTestCaseId);
+
+        // 工程1a: NOT EXISTS test_cases のもののみ INSERT。
+        const existingTcIds = new Set<string>();
+        for (const batch of toBatches(allNewIds, ID_LOOKUP_BATCH_SIZE)) {
+          const rows: Array<{ id: string }> = await db.select({ id: testCases.id }).from(testCases)
+            .where(inArray(testCases.id, batch));
+          for (const r of rows) existingTcIds.add(r.id);
+        }
+        const needCanonical = stagingAll.filter((s) => !existingTcIds.has(s.newTestCaseId));
+        if (needCanonical.length > 0) {
+          const categoryByRef = await getLatestCategoryByRef(pid, origin, token, needCanonical.map((s) => s.externalRef));
+          const rows = needCanonical.map((s) => ({
+            id: s.newTestCaseId,
+            projectId: pid,
+            title: '',
+            target: null,
+            category: resolveCanonicalCategory(categoryByRef.get(s.externalRef) ?? null),
+            given: '',
+            when: '',
+            then: '',
+            parameters: null,
+            status: 'draft',
+            isStale: 0,
+            ownership: 'machine',
+            mirrorOrigin: origin,
+            drift: 0,
+            fingerprint: null,
+            version: 1,
+            confidence: null,
+            sourceRef: null,
+            createdOrigin: origin,
+            metadata: null,
+            humanUpdatedAt: null,
+            systemUpdatedAt: null,
+            createdAt: now,
+          }));
+          for (const batch of toBatches(rows, CANONICAL_BATCH_ROWS)) {
+            await driver.batch([db.insert(testCases).values(batch).onConflictDoNothing()]);
+          }
+        }
+
+        // 工程1b: history INSERT(action='imported')。NOT EXISTS(imported history) でガードするため、
+        // 前回呼び出しで工程1a(canonical)だけが完了していた場合でも history だけが正しく追いつける。
+        const existingHistoryTcIds = new Set<string>();
+        for (const batch of toBatches(allNewIds, ID_LOOKUP_BATCH_SIZE)) {
+          const rows: Array<{ testCaseId: string }> = await db
+            .select({ testCaseId: testCaseHistory.testCaseId }).from(testCaseHistory)
+            .where(and(inArray(testCaseHistory.testCaseId, batch), eq(testCaseHistory.action, 'imported')));
+          for (const r of rows) existingHistoryTcIds.add(r.testCaseId);
+        }
+        const needHistory = stagingAll.filter((s) => !existingHistoryTcIds.has(s.newTestCaseId));
+        if (needHistory.length > 0) {
+          const rows = needHistory.map((s) => ({
+            id: uuid(), testCaseId: s.newTestCaseId, actor, action: 'imported' as const, delta: '{}', createdAt: now,
+          }));
+          for (const batch of toBatches(rows, HISTORY_BATCH_ROWS)) {
+            await driver.batch([db.insert(testCaseHistory).values(batch)]);
+          }
+        }
+
+        // 工程2: identity INSERT(ON CONFLICT DO NOTHING で冪等)。is_stale/last_seen_* は工程3が確定させる。
+        const identityRows = stagingAll.map((s) => ({
+          id: uuid(),
+          testCaseId: s.newTestCaseId,
+          projectId: pid,
+          origin,
+          externalRef: s.externalRef,
+          isStale: 0,
+          lastSeenSyncToken: null,
+          lastSeenAt: null,
+          createdAt: now,
+        }));
+        for (const batch of toBatches(identityRows, IDENTITY_BATCH_ROWS)) {
+          await driver.batch([db.insert(testCaseIdentities).values(batch).onConflictDoNothing()]);
+        }
+      }
+
+      // --- backfill: TestCaseObservation.test_case_id(data-model.md「新規ケースはcommitで確定・
+      // backfill」)。sync-protocol.md の工程表には明示のステップ番号が無いが、工程1/2 で canonical/
+      // identity が確定した直後に必要な補完(GC-1 突合: タスク報告に明記)。このセッション自身が記録した
+      // 観測(sync_token=:T)のうち、対応する identity が確定した external_ref の test_case_id を
+      // 埋める(WHERE test_case_id IS NULL で絞るため、一度埋めた行は以後の呼び出しで対象外になり
+      // 冪等)。listObservations・getLatestCommittedObservation(diff/accept-fingerprint の基盤。
+      // Task 14)はいずれも test_case_id を根拠に検索するため、これが無いと GET /observations・
+      // GET /diff が観測を一切見つけられない。
+      await driver.batch([
+        db.update(testCaseObservations)
+          .set({
+            testCaseId: sql`(
+              SELECT i.test_case_id FROM test_case_identities i
+              WHERE i.project_id = test_case_observations.project_id
+                AND i.origin = test_case_observations.origin
+                AND i.external_ref = test_case_observations.external_ref
+            )`,
+          })
+          .where(sql`test_case_observations.sync_token = ${token} AND test_case_observations.test_case_id IS NULL`),
+      ]);
+
+      // --- 工程3〜7(windowLimit で反復。1つの driver.batch = 1トランザクションにまとめて実行) ---
+      const windowedCounts = await driver.batch([
+        // 工程3: last_seen 確定+un-stale。参照元は sync_seen(Task 15 ノートどおり。観測ではない)。
+        db.update(testCaseIdentities)
+          .set({ lastSeenSyncToken: token, lastSeenAt: now, isStale: 0 })
+          .where(sql`rowid IN (
+            SELECT rowid FROM test_case_identities
+            WHERE project_id = ${pid} AND origin = ${origin}
+              AND external_ref IN (SELECT external_ref FROM sync_seen WHERE sync_token = ${token})
+              AND (last_seen_sync_token IS NOT ${token} OR is_stale != 0)
+            LIMIT ${windowLimit}
+          )`),
+        // 工程4: Stale マーク(per-origin)。last_seen_sync_token が NULL(工程3がまだ確定させていない
+        // 新規 identity)は対象外にする(工程3/4 が同一呼び出し内で windowLimit により競合し、
+        // 今セッションで初めて出現した identity を誤って stale にしてしまうことを防ぐガード)。
+        db.update(testCaseIdentities)
+          .set({ isStale: 1 })
+          .where(sql`rowid IN (
+            SELECT rowid FROM test_case_identities
+            WHERE project_id = ${pid} AND origin = ${origin}
+              AND last_seen_sync_token IS NOT NULL AND last_seen_sync_token != ${token}
+              AND is_stale = 0
+            LIMIT ${windowLimit}
+          )`),
+        // 工程5: ミラー昇格。title/given/when/then/parameters/fingerprint/confidence/source_ref を
+        // 相関サブクエリで反映する(brief 工程実装対応表。sync-protocol.md の SQL 例は confidence/
+        // source_ref を明示しないが、brief がこの2列も含めると明記しているため実装に含める。
+        // タスク報告のクロスチェック参照)。WHERE の fingerprint 差分チェックで再実行 no-op 化する。
+        db.update(testCases)
+          .set({
+            title: latestObservationSubquery(pid, origin, token, sql`json_extract(o.observed, '$.title')`),
+            given: latestObservationSubquery(pid, origin, token, sql`json_extract(o.observed, '$.given')`),
+            when: latestObservationSubquery(pid, origin, token, sql`json_extract(o.observed, '$.when')`),
+            then: latestObservationSubquery(pid, origin, token, sql`json_extract(o.observed, '$.then')`),
+            parameters: latestObservationSubquery(pid, origin, token, sql`json_extract(o.observed, '$.parameters')`),
+            fingerprint: latestObservationSubquery(pid, origin, token, sql`o.fingerprint`),
+            confidence: latestObservationSubquery(pid, origin, token, sql`o.confidence`),
+            sourceRef: latestObservationSubquery(pid, origin, token, sql`json_extract(o.observed, '$.source_ref')`),
+            systemUpdatedAt: now,
+          })
+          .where(sql`rowid IN (
+            SELECT rowid FROM test_cases
+            WHERE project_id = ${pid} AND ownership = 'machine' AND status != 'archived' AND mirror_origin = ${origin}
+              AND fingerprint IS NOT ${latestObservationSubquery(pid, origin, token, sql`o.fingerprint`)}
+            LIMIT ${windowLimit}
+          )`),
+        // 工程6: Drift 記録。human-owned・非 archived のみ対象(fingerprint=null の手動作成は未評価)。
+        db.update(testCases)
+          .set({ drift: 1, systemUpdatedAt: now })
+          .where(sql`rowid IN (
+            SELECT rowid FROM test_cases
+            WHERE project_id = ${pid} AND ownership = 'human' AND status != 'archived' AND mirror_origin = ${origin}
+              AND fingerprint IS NOT NULL
+              AND fingerprint != ${latestObservationSubquery(pid, origin, token, sql`o.fingerprint`)}
+            LIMIT ${windowLimit}
+          )`),
+        // 工程7: Canonical Rollup。project 全体(origin 不問)が対象。approved/archived は保護。
+        // WHERE に is_stale != <計算値> を含めることで、変更が必要な行のみに絞り windowLimit を消費する
+        // (既に正しい行を何度も数え直して windowLimit を浪費しない)。
+        db.update(testCases)
+          .set({ isStale: rollupIsStaleExpr(now, identityTtlMs), systemUpdatedAt: now })
+          .where(sql`rowid IN (
+            SELECT rowid FROM test_cases
+            WHERE project_id = ${pid} AND status NOT IN ('approved', 'archived')
+              AND is_stale != ${rollupIsStaleExpr(now, identityTtlMs)}
+            LIMIT ${windowLimit}
+          )`),
+      ]);
+
+      const more = windowedCounts.some((c) => (c ?? 0) >= windowLimit);
+      return { more };
+    },
+
+    // 工程8(セッション確定)。スペック D-01: COUNT 3本 + committed 遷移を1 batch で。
+    async syncFinalize(scope: OrgScope, pid: string, token: string, now: number) {
+      const session = await getSyncSessionRow(pid, token);
+      if (!session) throw new Error('syncFinalize: sync session not found');
+
+      if (session.status === 'committed') {
+        return {
+          createdCount: session.createdCount ?? 0,
+          changedCount: session.changedCount ?? 0,
+          staledCount: session.staledCount ?? 0,
+          alreadyCommitted: true,
+        };
+      }
+
+      const [createdRow] = await db.select({ n: count() }).from(syncStaging).where(eq(syncStaging.syncToken, token));
+      const createdCount = Number(createdRow?.n ?? 0);
+
+      const [changedRow] = await db
+        .select({ n: sql<number>`COUNT(DISTINCT ${testCaseObservations.externalRef})` })
+        .from(testCaseObservations)
+        .where(eq(testCaseObservations.syncToken, token));
+      const changedCount = Number(changedRow?.n ?? 0);
+
+      const [staledRow] = await db.select({ n: count() }).from(testCaseIdentities)
+        .where(and(
+          eq(testCaseIdentities.projectId, pid),
+          eq(testCaseIdentities.origin, session.origin),
+          ne(testCaseIdentities.lastSeenSyncToken, token), // NULL は工程4と同じ理由で対象外(タスク報告参照)
+        ));
+      const staledCount = Number(staledRow?.n ?? 0);
+
+      const counts = await driver.batch([
+        db.update(syncSessions)
+          .set({ status: 'committed', committedAt: now, createdCount, changedCount, staledCount })
+          .where(and(eq(syncSessions.token, token), eq(syncSessions.status, 'active'))),
+      ]);
+
+      if ((counts[0] ?? 0) === 0) {
+        // AND status='active' に0行しか一致しなかった(他プロセスが先に committed 済み)。保存済み値へ
+        // フォールバックする(冪等。sync-protocol.md「OCC 競合(commit 内部) — 発生しない」の想定外だが
+        // belt-and-suspenders として安全側に倒す)。
+        const after = await getSyncSessionRow(pid, token);
+        return {
+          createdCount: after?.createdCount ?? 0,
+          changedCount: after?.changedCount ?? 0,
+          staledCount: after?.staledCount ?? 0,
+          alreadyCommitted: true,
+        };
+      }
+
+      return { createdCount, changedCount, staledCount, alreadyCommitted: false };
+    },
+
+    // syncMappings: created(staging)/updated(観測(:T)有り・staging除く)/unchanged(sync_seenのみ)。
+    // 分類ロジックは domain/sync-commit.ts の classifySyncMappings(純関数)。test_case_id の解決のみ
+    // ここ(DB 層)の責務。
+    async syncMappings(scope: OrgScope, pid: string, token: string) {
+      const session = await getSyncSessionRow(pid, token);
+      if (!session) return [];
+      const origin = session.origin;
+
+      const stagingRows: SyncStagingRow[] = await db.select().from(syncStaging).where(eq(syncStaging.syncToken, token));
+      const observedRows: Array<{ externalRef: string }> = await db
+        .select({ externalRef: testCaseObservations.externalRef }).from(testCaseObservations)
+        .where(eq(testCaseObservations.syncToken, token));
+      const seenRows: Array<{ externalRef: string }> = await db
+        .select({ externalRef: syncSeen.externalRef }).from(syncSeen)
+        .where(eq(syncSeen.syncToken, token));
+
+      const stagingTestCaseIdByRef = new Map(stagingRows.map((s): [string, string] => [s.externalRef, s.newTestCaseId]));
+      const classified = classifySyncMappings({
+        stagingRefs: stagingRows.map((s) => s.externalRef),
+        observedRefs: observedRows.map((o) => o.externalRef),
+        seenRefs: seenRows.map((s) => s.externalRef),
+      });
+
+      // created 以外(updated/unchanged)は既存 identity から test_case_id を解決する。
+      const nonStagingRefs = classified.filter((c) => c.outcome !== 'created').map((c) => c.externalRef);
+      const identityTestCaseIdByRef = new Map<string, string>();
+      for (const batch of toBatches(nonStagingRefs, FENCE_REFS_BATCH_SIZE)) {
+        const rows: Array<{ externalRef: string; testCaseId: string }> = await db
+          .select({ externalRef: testCaseIdentities.externalRef, testCaseId: testCaseIdentities.testCaseId })
+          .from(testCaseIdentities)
+          .where(and(
+            eq(testCaseIdentities.projectId, pid),
+            eq(testCaseIdentities.origin, origin),
+            inArray(testCaseIdentities.externalRef, batch),
+          ));
+        for (const r of rows) identityTestCaseIdByRef.set(r.externalRef, r.testCaseId);
+      }
+
+      const result: SyncMappingItem[] = [];
+      for (const c of classified) {
+        const testCaseId = c.outcome === 'created'
+          ? stagingTestCaseIdByRef.get(c.externalRef)
+          : identityTestCaseIdByRef.get(c.externalRef);
+        if (!testCaseId) continue; // 解決不能(通常起きない不変条件違反)は安全側で除外する
+        result.push({ externalRef: c.externalRef, testCaseId, outcome: c.outcome });
+      }
+      return result;
+    },
+
+    // GET /sync/status(スペック D-01)。
+    async syncStatus(scope: OrgScope, pid: string) {
+      const committedRows: SyncSessionRow[] = await db.select().from(syncSessions)
+        .where(and(eq(syncSessions.projectId, pid), eq(syncSessions.status, 'committed')))
+        .orderBy(desc(syncSessions.committedAt));
+      // origin 別の最新 committed セッションのみ(committedAt DESC の先頭が最新)。
+      const latestByOrigin = new Map<string, SyncSessionRow>();
+      for (const r of committedRows) {
+        if (!latestByOrigin.has(r.origin)) latestByOrigin.set(r.origin, r);
+      }
+      const origins = [...latestByOrigin.values()]
+        .sort((a, b) => a.origin.localeCompare(b.origin))
+        .map((r) => ({
+          origin: r.origin,
+          lastCommittedAt: r.committedAt as number,
+          lastSummary: { created: r.createdCount ?? 0, changed: r.changedCount ?? 0, staled: r.staledCount ?? 0 },
+        }));
+
+      const [unreviewedRow] = await db.select({ n: count() }).from(testCases)
+        .where(and(eq(testCases.projectId, pid), eq(testCases.status, 'draft'), eq(testCases.ownership, 'machine')));
+      const [driftRow] = await db.select({ n: count() }).from(testCases)
+        .where(and(eq(testCases.projectId, pid), eq(testCases.drift, 1), ne(testCases.status, 'archived')));
+      const [staleRow] = await db.select({ n: count() }).from(testCases)
+        .where(and(eq(testCases.projectId, pid), eq(testCases.isStale, 1), ne(testCases.status, 'archived')));
+
+      return {
+        origins,
+        current: {
+          unreviewed: Number(unreviewedRow?.n ?? 0),
+          drift: Number(driftRow?.n ?? 0),
+          stale: Number(staleRow?.n ?? 0),
+        },
+      };
     },
   } satisfies Storage;
 

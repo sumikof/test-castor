@@ -26,6 +26,7 @@ function testConfig(): AppDeps['config'] {
     syncRateLimit: { windowMs: 60_000, max: 120 },
     observationRetentionMs: 7_776_000_000,
     identityTtlMs: 7_776_000_000,
+    commitWindowLimit: 500,
   };
 }
 function allowAll() {

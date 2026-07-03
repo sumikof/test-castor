@@ -130,6 +130,46 @@ export type SyncStartResult = { kind: 'created'; session: SyncSessionRow } | { k
 
 export interface SyncAppendOutcome { external_ref: string; outcome: 'inserted' | 'duplicate' }
 
+// --- sync commit(task-16-brief.md「Produces(Storage 追加分)」。工程0〜8)---
+
+/**
+ * syncCommitWindow の入力(task-16-brief.md)。identityTtlMs は工程7(rollup)の TTL、windowLimit は
+ * 工程3〜7 の rowid ウィンドウ幅(1回の呼び出しで各工程が処理する最大行数)。
+ *
+ * actor: 工程1(Canonical 生成)の history INSERT(action='imported')に使う型付き参照
+ * `'token:<apiTokenId>'`。task-16-brief.md のインターフェース原文にはこの引数が無いが、
+ * sync-protocol.md/工程実装対応表が明示する「actor='token:<apiTokenId>'」を満たすには commit を
+ * 呼んだ Bearer トークンの id が必要で、Storage 層の外(HTTP ルート)にしか存在しない情報のため、
+ * ここに追加した(ブリーフのシグネチャ抜けと判断。タスク報告に明記)。
+ */
+export interface SyncCommitWindowParams {
+  now: number;
+  identityTtlMs: number;
+  windowLimit: number;
+  actor: string;
+}
+export interface SyncCommitWindowResult { more: boolean }
+
+export interface SyncFinalizeResult {
+  createdCount: number;
+  changedCount: number;
+  staledCount: number;
+  alreadyCommitted: boolean;
+}
+
+export type SyncMappingOutcome = 'created' | 'updated' | 'unchanged';
+export interface SyncMappingItem { externalRef: string; testCaseId: string; outcome: SyncMappingOutcome }
+
+export interface SyncStatusOrigin {
+  origin: string;
+  lastCommittedAt: number;
+  lastSummary: { created: number; changed: number; staled: number };
+}
+export interface SyncStatusResult {
+  origins: SyncStatusOrigin[];
+  current: { unreviewed: number; drift: number; stale: number };
+}
+
 export interface Storage {
   // --- setup / organization ---
   countOrganizations(): Promise<number>;
@@ -324,4 +364,48 @@ export interface Storage {
   syncAppendObservations(
     scope: OrgScope, pid: string, session: SyncSessionRow, obs: ChunkObservation[], now: number,
   ): Promise<SyncAppendOutcome[]>;
+
+  // --- sync commit(task-16-brief.md。工程0-8)---
+
+  /**
+   * commit 工程0〜7 を実行する(sync-protocol.md「Commit 8工程パイプライン」)。
+   * 工程0(同定採番)〜工程2(Identity 生成)は毎回全件を完了させる(D1 bind 上限に収まるようバッチ分割
+   * するのみ)。工程3(last_seen 確定+un-stale)〜工程7(Rollup)は
+   * `WHERE rowid IN (SELECT rowid FROM ... WHERE <述語> LIMIT :windowLimit)` パターン
+   * (notes.md 実装標準。素の UPDATE...LIMIT は不使用)で1回の呼び出しあたり最大 windowLimit 行に
+   * 限定する。5工程のいずれかが実際に windowLimit 行へ到達した(=まだ残りがあるかもしれない)場合
+   * `more:true` を返し、呼び出し側(commit ルート)は同一トークンで再度呼び出す。全工程が冪等
+   * (WHERE 述語が「まだ適用されていない行」のみに絞り込む)ため、繰り返し呼んでも収束する。
+   *
+   * 工程3/4 の参照元は sync_seen(Task 15 ノートどおり。TestCaseObservation ではない。
+   * 変化点のみ記録のため観測を参照すると無変化 ref を誤って stale 判定してしまうため)。
+   */
+  syncCommitWindow(scope: OrgScope, pid: string, token: string, p: SyncCommitWindowParams): Promise<SyncCommitWindowResult>;
+
+  /**
+   * commit 工程8(セッション確定)。COUNT 3本(created=SyncStaging行数/changed=DISTINCT external_ref in
+   * observations(:T)/staled=(P,O)で last_seen_sync_token!=:T の identity 数)を算出し、
+   * `UPDATE sync_sessions SET status='committed', committed_at, *_count WHERE token=:T AND
+   * status='active'` と同一 batch で書く(スペック D-01)。
+   *
+   * 冪等: 呼び出し時点で既に committed なら、再計算せず保存済みの *_count をそのまま返し
+   * `alreadyCommitted:true`。UPDATE の対象行が(競合等で)0件だった場合も同様に保存済み値へフォール
+   * バックする(`AND status='active'` により2重 finalize が2重に着地しない)。
+   */
+  syncFinalize(scope: OrgScope, pid: string, token: string, now: number): Promise<SyncFinalizeResult>;
+
+  /**
+   * 当該トークンの `external_ref → test_case_id` マップ(sync-protocol.md commit レスポンス例の
+   * `mappings`)。created=SyncStaging に有る/updated=観測(:T)が有る(staging 除く)/
+   * unchanged=sync_seen のみ(分類ロジックは domain/sync-commit.ts の classifySyncMappings)。
+   * staled(今回未出現)は含めない(syncFinalize の staledCount で報告。task-16-brief.md 注記)。
+   */
+  syncMappings(scope: OrgScope, pid: string, token: string): Promise<SyncMappingItem[]>;
+
+  /**
+   * GET /sync/status(スペック D-01)。origins は origin 別の最新 committed セッション
+   * (committed セッションが無い origin は含めない)。current は非 archived の
+   * unreviewed(status=draft AND ownership=machine)/drift(drift=true)/stale(is_stale=true)件数。
+   */
+  syncStatus(scope: OrgScope, pid: string): Promise<SyncStatusResult>;
 }
