@@ -22,12 +22,14 @@ export interface Flash {
  * - password_changed: S-02「トースト / 通知」成功(引き継ぎ)。S-04(パスワードリセット実行。MVP後)/
  *   S-20(プロフィール。Task 21)からの遷移で使う想定。S-02 のドキュメントが文言を明記しているため、
  *   本タスクの時点で先取りしてキーを登録しておく。
+ * - project_created: S-06「トースト / 通知」成功(S-07 でプロジェクト作成完了後)。task-18-brief.md。
  */
 const FLASH_MESSAGES: Record<string, Flash> = {
   setup_complete: { kind: 'success', text: 'セットアップが完了しました。ログインしてください' },
   setup_already_complete: { kind: 'error', text: 'セットアップは既に完了しています' },
   session_expired: { kind: 'warn', text: 'セッションが失効しました。再度ログインしてください' },
   password_changed: { kind: 'success', text: 'パスワードを変更しました。再度ログインしてください' },
+  project_created: { kind: 'success', text: 'プロジェクトを作成しました' },
 };
 
 /** 未知のキー・未指定は null(呼び出し側は「トーストを表示しない」として扱う)。 */

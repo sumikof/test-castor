@@ -452,3 +452,39 @@ th {
   color: var(--color-text-muted);
   padding: var(--spacing-5) var(--spacing-3);
 }
+
+/* ---- S-06/S-07(Task 18): プロジェクト一覧・作成ダイアログ ---- */
+
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--spacing-3);
+}
+.dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--spacing-3);
+}
+.dialog-close {
+  font-size: 1.1rem;
+  line-height: 1;
+  color: var(--color-text-muted);
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--spacing-2);
+  margin-top: var(--spacing-3);
+}
+/* .btn の既定 width:100%(認証カードの縦積みフォーム向け)は、横並びのヘッダー/ダイアログ
+   ボタンには合わないため、この3箇所に限り内容幅に戻す。 */
+.page-header .btn,
+.empty-state .btn,
+.dialog-actions .btn {
+  width: auto;
+}
+.empty-state .btn {
+  margin-top: var(--spacing-3);
+}

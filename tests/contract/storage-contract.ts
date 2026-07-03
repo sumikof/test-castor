@@ -148,6 +148,26 @@ export function runStorageContract(name: string, factory: () => Promise<Contract
       expect(upd?.repoUrl).toBeNull();
     });
 
+    // task-18-brief.md(S-06 一覧)の SSR スモークテストで発覚した回帰の固定: listProjects の
+    // testcaseCount 相関サブクエリが、drizzle の sql タグ内で `${projects.id}` を素の Column 参照として
+    // 埋め込むと(サブクエリ側の test_cases も同名の id 列を持つため)テーブル修飾無しの "id" にレンダリング
+    // され、tc.project_id = tc.id という無意味な比較になり常に 0 件と評価されていた
+    // (drizzle-storage.ts の該当箇所を sql.raw で完全修飾する形に修正)。非archivedのみを数え、
+    // project間で混線しないことをここで固定する(D-05)。
+    it('projects: 一覧の testcaseCount は非archivedのみを数え、project間で混線しない(D-05・回帰防止)', async () => {
+      const p1 = await ctx.storage.createProject(scope, { name: 'proj-with-tc' }, now);
+      const p2 = await ctx.storage.createProject(scope, { name: 'proj-other' }, now + 1);
+
+      await ctx.storage.createTestCaseManual(scope, p1.id, tcInput({ status: 'draft' }), historyEntry(), now);
+      await ctx.storage.createTestCaseManual(scope, p1.id, tcInput({ status: 'approved' }), historyEntry(), now);
+      await ctx.storage.createTestCaseManual(scope, p1.id, tcInput({ status: 'archived' }), historyEntry(), now);
+      await ctx.storage.createTestCaseManual(scope, p2.id, tcInput({ status: 'draft' }), historyEntry(), now);
+
+      const list = await ctx.storage.listProjects(scope);
+      expect(list.find((x) => x.id === p1.id)?.testcaseCount).toBe(2); // draft+approved のみ(archived除外)
+      expect(list.find((x) => x.id === p2.id)?.testcaseCount).toBe(1);
+    });
+
     it('tokens: 発行・hash 照合・失効で照合不可(認証述語)・失効は冪等', async () => {
       const p = await ctx.storage.createProject(scope, { name: 'pr' }, now);
       const t = await ctx.storage.createApiToken(scope, p.id, 'discovery-ci', 'HASH1', now);

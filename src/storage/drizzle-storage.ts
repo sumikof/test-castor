@@ -346,10 +346,18 @@ export function createDrizzleStorage(driver: StorageDriver): Storage {
       await db.delete(sessions).where(cond).run();
     },
     async listProjects(scope) {
+      // バグ修正(task-18-brief.md の GC-8 スモークテストで発覧・D-05 testcase_count が常に0になる):
+      // `${projects.id}` を素の Column 参照として sql タグに埋め込むと、drizzle はトップレベル
+      // クエリの FROM が単一テーブル(projects)であることから曖昧性なしと判断し `"id"`(テーブル
+      // 修飾無し)にレンダリングしてしまう。しかしこの参照はサブクエリ内(`FROM test_cases tc`)に
+      // ネストされており、test_cases 自身も `id` 列を持つため、修飾無しの `"id"` は外側の
+      // projects.id ではなく tc.id(サブクエリ自身の行の id)に束縛されてしまう
+      // (`tc.project_id = tc.id` という無意味な比較になり、ほぼ常に 0 件と評価される)。
+      // sql.raw で明示的に `"projects"."id"` と完全修飾し、この曖昧性を排除する。
       const rows = await db
         .select({
           project: projects,
-          testcaseCount: sql<number>`(SELECT COUNT(*) FROM ${testCases} tc WHERE tc.project_id = ${projects.id} AND tc.status != 'archived')`,
+          testcaseCount: sql<number>`(SELECT COUNT(*) FROM ${testCases} tc WHERE tc.project_id = ${sql.raw('"projects"."id"')} AND tc.status != 'archived')`,
         })
         .from(projects).where(eq(projects.organizationId, scope.organizationId)).orderBy(projects.createdAt);
       return rows.map((r: any) => ({ ...r.project, testcaseCount: Number(r.testcaseCount) }));

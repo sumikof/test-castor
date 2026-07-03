@@ -19,6 +19,7 @@ import { tokensRoutes } from './api/tokens';
 import { testCasesRoutes } from './api/testcases';
 import { syncRoutes } from './api/sync';
 import { authPageRoutes } from './ui/auth-pages';
+import { projectPageRoutes } from './ui/projects-pages';
 
 export interface AppDeps {
   storage: Storage;
@@ -77,6 +78,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   // 「API の 404 フォールバックより前」という規約に合わせ、onError/notFound の直前に置く。
   // Task 18 以降がここに projects-pages 等を追記していく。
   app.route('/', authPageRoutes);
+  // S-06 プロジェクト一覧 / S-07 プロジェクト作成ダイアログ(task-18-brief.md)。
+  app.route('/', projectPageRoutes);
 
   app.onError(errorMiddleware);
   app.notFound(() => {
