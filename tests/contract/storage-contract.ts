@@ -1,13 +1,14 @@
 // tests/contract/storage-contract.ts
 import { describe, it, expect, beforeEach } from 'vitest';
-import type { Storage, NewTestCaseColumns, NewHistoryEntry } from '../../src/storage/interface';
+import type { Storage, NewTestCaseColumns, NewHistoryEntry, ChunkObservation } from '../../src/storage/interface';
+import type { SyncSessionRow } from '../../src/storage/schema';
 
 export interface ContractCtx {
   storage: Storage;
   rawExec(sqlText: string): Promise<void>;
 }
 const WIPE_ORDER = [
-  'test_case_history', 'test_case_observations', 'sync_staging', 'sync_sessions',
+  'test_case_history', 'test_case_observations', 'sync_seen', 'sync_staging', 'sync_sessions',
   'test_case_identities', 'test_cases', 'api_tokens', 'sessions', 'projects', 'users', 'organizations',
 ];
 
@@ -31,6 +32,18 @@ function tcInput(overrides: Partial<NewTestCaseColumns> = {}): NewTestCaseColumn
 
 function historyEntry(overrides: Partial<NewHistoryEntry> = {}): NewHistoryEntry {
   return { actor: 'user:00000000-0000-0000-0000-0000000000ff', action: 'created', delta: {}, ...overrides };
+}
+
+/** task-15-brief.md「Step 2」向けの ChunkObservation デフォルト値。 */
+function chunkObs(overrides: Partial<ChunkObservation> = {}): ChunkObservation {
+  return {
+    externalRef: 'ext-1',
+    fingerprint: 'fp-1',
+    observed: { title: 't', given: 'g', when: 'w', then: 'th', parameters: [], source_ref: {}, schema_version: '1.0' },
+    category: null,
+    confidence: null,
+    ...overrides,
+  };
 }
 
 export function runStorageContract(name: string, factory: () => Promise<ContractCtx>) {
@@ -772,6 +785,169 @@ export function runStorageContract(name: string, factory: () => Promise<Contract
       const latest = await ctx.storage.getLatestCommittedObservation(scope, p.id, created.id);
       expect(latest?.id).toBe('obs-committed-excl'); // active 由来(より新しい)は除外される
       expect(latest?.fingerprint).toBe('fp-committed');
+    });
+
+    // task-15-brief.md「Step 2: 契約テスト追記」(start/chunk・出現台帳)
+    it('sync: syncStart は created(session 各列を正しく設定)/conflict(同一 (project,origin) の active 重複)を判別し、別 origin なら並行 created を許す', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-sync-start' }, now);
+
+      const created = await ctx.storage.syncStart(scope, p.id, { token: 'tok-a1', origin: 'discovery-v1', now, slidingMs: 600_000 });
+      expect(created.kind).toBe('created');
+      if (created.kind !== 'created') throw new Error('unreachable');
+      expect(created.session.token).toBe('tok-a1');
+      expect(created.session.projectId).toBe(p.id);
+      expect(created.session.origin).toBe('discovery-v1');
+      expect(created.session.status).toBe('active');
+      expect(created.session.startedAt).toBe(now);
+      expect(created.session.expiresAt).toBe(now + 600_000);
+      expect(created.session.committedAt).toBeNull();
+
+      // 同一 (project,origin) に active が既存 → conflict(部分一意索引違反の捕捉)
+      const conflict = await ctx.storage.syncStart(scope, p.id, { token: 'tok-a2', origin: 'discovery-v1', now: now + 1, slidingMs: 600_000 });
+      expect(conflict).toEqual({ kind: 'conflict' });
+      expect(await ctx.storage.syncGetSession(scope, p.id, 'tok-a2')).toBeNull(); // conflict 側は書き込まれない
+
+      // 別 origin なら並行 created 可
+      const otherOrigin = await ctx.storage.syncStart(scope, p.id, { token: 'tok-b1', origin: 'selfheal-v1', now: now + 2, slidingMs: 600_000 });
+      expect(otherOrigin.kind).toBe('created');
+    });
+
+    it('sync: syncStart は期限切れ active を遅延評価で expired に倒してから created を返す(旧セッションは expired に遷移)', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-sync-lazyexpire' }, now);
+
+      const first = await ctx.storage.syncStart(scope, p.id, { token: 'tok-old', origin: 'discovery-v1', now, slidingMs: 1000 });
+      expect(first.kind).toBe('created');
+
+      const later = now + 5000; // first の expiresAt(now+1000)を過ぎた時刻
+      const second = await ctx.storage.syncStart(scope, p.id, { token: 'tok-new', origin: 'discovery-v1', now: later, slidingMs: 1000 });
+      expect(second.kind).toBe('created');
+
+      expect((await ctx.storage.syncGetSession(scope, p.id, 'tok-old'))?.status).toBe('expired');
+      expect((await ctx.storage.syncGetSession(scope, p.id, 'tok-new'))?.status).toBe('active');
+    });
+
+    it('sync: syncGetSession は project 境界で1件取得し、存在しなければ null', async () => {
+      const p1 = await ctx.storage.createProject(scope, { name: 'proj-sync-get1' }, now);
+      const p2 = await ctx.storage.createProject(scope, { name: 'proj-sync-get2' }, now);
+      await ctx.storage.syncStart(scope, p1.id, { token: 'tok-get', origin: 'discovery-v1', now, slidingMs: 600_000 });
+
+      expect((await ctx.storage.syncGetSession(scope, p1.id, 'tok-get'))?.token).toBe('tok-get');
+      expect(await ctx.storage.syncGetSession(scope, p2.id, 'tok-get')).toBeNull(); // 他 project の token は null
+      expect(await ctx.storage.syncGetSession(scope, p1.id, 'tok-nonexistent')).toBeNull();
+    });
+
+    it('sync: syncTouchExpiry はスライディング失効の延長を反映する', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-sync-touch' }, now);
+      await ctx.storage.syncStart(scope, p.id, { token: 'tok-touch', origin: 'discovery-v1', now, slidingMs: 600_000 });
+
+      await ctx.storage.syncTouchExpiry('tok-touch', now + 999_999);
+      expect((await ctx.storage.syncGetSession(scope, p.id, 'tok-touch'))?.expiresAt).toBe(now + 999_999);
+    });
+
+    it('sync: syncExpireLapsed は対象 (project,origin) の期限切れ active のみを expired に倒す(origin=null はプロジェクト全体)', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-sync-expirelapsed' }, now);
+      await ctx.storage.syncStart(scope, p.id, { token: 'tok-e1', origin: 'discovery-v1', now, slidingMs: 100 });
+      await ctx.storage.syncStart(scope, p.id, { token: 'tok-e2', origin: 'selfheal-v1', now, slidingMs: 100_000 });
+
+      // origin 指定: discovery-v1 のみ期限切れになった時刻でスイープ → discovery-v1 のみ expired
+      await ctx.storage.syncExpireLapsed(scope, p.id, 'discovery-v1', now + 1000);
+      expect((await ctx.storage.syncGetSession(scope, p.id, 'tok-e1'))?.status).toBe('expired');
+      expect((await ctx.storage.syncGetSession(scope, p.id, 'tok-e2'))?.status).toBe('active'); // まだ期限内
+
+      // origin=null: プロジェクト全体を対象に、tok-e2 も期限切れになった時刻でスイープ
+      await ctx.storage.syncExpireLapsed(scope, p.id, null, now + 200_000);
+      expect((await ctx.storage.syncGetSession(scope, p.id, 'tok-e2'))?.status).toBe('expired');
+    });
+
+    it('sync: syncAppendObservations は変化点のみ観測を追記し、同一セッションへの同一 fingerprint 再送は duplicate になる(観測行が増えない証拠として2回目以降も duplicate のまま安定する)', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-sync-append' }, now);
+      const started = await ctx.storage.syncStart(scope, p.id, { token: 'tok-append', origin: 'discovery-v1', now, slidingMs: 600_000 });
+      if (started.kind !== 'created') throw new Error('unreachable');
+      const session = started.session;
+
+      const obs1 = chunkObs({ externalRef: 'ext-dup', fingerprint: 'fp-1' });
+      const first = await ctx.storage.syncAppendObservations(scope, p.id, session, [obs1], now + 1);
+      expect(first).toEqual([{ external_ref: 'ext-dup', outcome: 'inserted' }]);
+
+      // 同一 fingerprint の再送(ネットワーク再送・同一チャンク再送を模す)→ duplicate
+      const second = await ctx.storage.syncAppendObservations(scope, p.id, session, [obs1], now + 2);
+      expect(second).toEqual([{ external_ref: 'ext-dup', outcome: 'duplicate' }]);
+      // 3回目も安定して duplicate(観測行が増え続けていれば fingerprint 比較の前提が壊れて re-inserted になりうる)
+      const third = await ctx.storage.syncAppendObservations(scope, p.id, session, [obs1], now + 3);
+      expect(third).toEqual([{ external_ref: 'ext-dup', outcome: 'duplicate' }]);
+
+      // fingerprint が変わった場合は新しい変化点として inserted
+      const changed = await ctx.storage.syncAppendObservations(
+        scope, p.id, session, [chunkObs({ externalRef: 'ext-dup', fingerprint: 'fp-2' })], now + 4,
+      );
+      expect(changed).toEqual([{ external_ref: 'ext-dup', outcome: 'inserted' }]);
+    });
+
+    it('sync: syncAppendObservations は16行/文の分割を跨いでも全件を正しく記録する(40件一括 → 全件 inserted、同一40件を再送 → 全件 duplicate)', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-sync-40' }, now);
+      const started = await ctx.storage.syncStart(scope, p.id, { token: 'tok-40', origin: 'discovery-v1', now, slidingMs: 600_000 });
+      if (started.kind !== 'created') throw new Error('unreachable');
+
+      const obsList = Array.from({ length: 40 }, (_, i) => chunkObs({ externalRef: `ext-${i}`, fingerprint: `fp-${i}` }));
+
+      const firstRound = await ctx.storage.syncAppendObservations(scope, p.id, started.session, obsList, now + 1);
+      expect(firstRound).toHaveLength(40);
+      expect(firstRound.every((r) => r.outcome === 'inserted')).toBe(true);
+
+      // 全40件が実際に永続化されていなければ、再送時に一部が誤って 'inserted' に戻ってしまう
+      // (16行/文の分割の過程で一部の観測が欠落するバグの検知手段)。
+      const secondRound = await ctx.storage.syncAppendObservations(scope, p.id, started.session, obsList, now + 2);
+      expect(secondRound).toHaveLength(40);
+      expect(secondRound.every((r) => r.outcome === 'duplicate')).toBe(true);
+    });
+
+    it('sync: syncAppendObservations の committed-JOIN フェンス: active な他セッションの観測は最新指紋比較の対象にならないが、committed セッションの観測は対象になる', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-sync-fence' }, now);
+
+      // 「他セッション」(active・current でも committed でもない)の観測は最新指紋比較から除外される。
+      await ctx.rawExec(
+        `INSERT INTO sync_sessions (token, project_id, origin, status, started_at, expires_at) ` +
+        `VALUES ('other-active', '${p.id}', 'discovery-v1', 'active', ${now}, ${now + 100000})`,
+      );
+      await ctx.rawExec(
+        `INSERT INTO test_case_observations (id, external_ref, project_id, fingerprint, observed, sync_token, origin, created_at) ` +
+        `VALUES ('obs-other-active', 'ext-fence-active', '${p.id}', 'fp-other-active', '{}', 'other-active', 'discovery-v1', ${now})`,
+      );
+
+      // committed セッションの観測は最新指紋比較の対象になる。
+      await ctx.rawExec(
+        `INSERT INTO sync_sessions (token, project_id, origin, status, started_at, expires_at, committed_at) ` +
+        `VALUES ('other-committed', '${p.id}', 'discovery-v1', 'committed', ${now}, ${now + 100000}, ${now})`,
+      );
+      await ctx.rawExec(
+        `INSERT INTO test_case_observations (id, external_ref, project_id, fingerprint, observed, sync_token, origin, created_at) ` +
+        `VALUES ('obs-other-committed', 'ext-fence-committed', '${p.id}', 'fp-committed', '{}', 'other-committed', 'discovery-v1', ${now})`,
+      );
+
+      // "current" セッション: sync_seen.sync_token は sync_sessions への FK のため行自体は必要だが、
+      // 同一 origin に status='active' の行が既に(other-active として)存在し uq_active_session と
+      // 衝突するため、DB 上は 'expired' として登録する(syncAppendObservations は渡された session
+      // オブジェクトの token/origin の等価比較のみでフェンス判定するため、DB 行の status 値そのものは
+      // 判定に使われず、この不一致はテスト目的上無害)。
+      await ctx.rawExec(
+        `INSERT INTO sync_sessions (token, project_id, origin, status, started_at, expires_at) ` +
+        `VALUES ('current-fence', '${p.id}', 'discovery-v1', 'expired', ${now}, ${now + 100000})`,
+      );
+      const currentSession: SyncSessionRow = {
+        token: 'current-fence', projectId: p.id, origin: 'discovery-v1', status: 'active',
+        startedAt: now, expiresAt: now + 100000, committedAt: null, createdCount: null, changedCount: null, staledCount: null,
+      };
+
+      const result = await ctx.storage.syncAppendObservations(scope, p.id, currentSession, [
+        chunkObs({ externalRef: 'ext-fence-active', fingerprint: 'fp-current' }), // 他activeの指紋は無視 → 初出扱いで inserted
+        chunkObs({ externalRef: 'ext-fence-committed', fingerprint: 'fp-committed' }), // committedの指紋と一致 → duplicate
+      ], now + 1);
+
+      expect(result).toEqual(expect.arrayContaining([
+        { external_ref: 'ext-fence-active', outcome: 'inserted' },
+        { external_ref: 'ext-fence-committed', outcome: 'duplicate' },
+      ]));
+      expect(result).toHaveLength(2);
     });
   });
 }

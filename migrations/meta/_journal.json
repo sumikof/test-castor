@@ -8,6 +8,13 @@
       "when": 1783034721564,
       "tag": "0000_numerous_moon_knight",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1783066327090,
+      "tag": "0001_narrow_network",
+      "breakpoints": true
     }
   ]
 }

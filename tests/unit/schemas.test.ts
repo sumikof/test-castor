@@ -41,4 +41,14 @@ describe('schemas', () => {
     const oversized = { title: 't', given: 'g', when: 'w', then: 't', parameters: [], source_ref: { blob: 'x'.repeat(LIMITS.observedBytes) }, schema_version: '1' };
     expect(observationSchema.safeParse({ external_ref: 'r', fingerprint: 'f', observed: oversized }).success).toBe(false);
   });
+  // task-15-brief.md「もう1つの docs ギャップ」: observation のトップレベル任意フィールド category(enum)。
+  it('observation: category は任意の enum(未指定可・不正値は拒否)', () => {
+    const base = {
+      external_ref: 'com.example.T#m', fingerprint: 'sha256:abc',
+      observed: { title: 't', given: 'g', when: 'w', then: 't', parameters: [], source_ref: {}, schema_version: '1.0' },
+    };
+    expect(observationSchema.safeParse(base).success).toBe(true); // 未指定は許容
+    expect(observationSchema.safeParse({ ...base, category: 'boundary' }).success).toBe(true);
+    expect(observationSchema.safeParse({ ...base, category: 'not-a-real-category' }).success).toBe(false);
+  });
 });

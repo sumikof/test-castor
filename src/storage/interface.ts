@@ -1,7 +1,7 @@
 // src/storage/interface.ts
 import type {
   OrganizationRow, UserRow, SessionRow, ProjectRow, ApiTokenRow, TestCaseRow, TestCaseHistoryRow,
-  TestCaseIdentityRow, TestCaseObservationRow,
+  TestCaseIdentityRow, TestCaseObservationRow, SyncSessionRow,
 } from './schema';
 import type { Role, Status, Category, Ownership, HistoryAction, BulkAction } from '../schemas/enums';
 import type { ParamRow } from '../domain/testcase-rules';
@@ -105,6 +105,30 @@ export interface BulkActionResult {
 
 /** GET /testcases/:id/observations のクエリフィルタ(origin 任意)。 */
 export interface ObservationFilters { origin?: string }
+
+// --- sync(task-15-brief.md「Produces(Storage 追加分)」。start/chunk のみ。commit は Task 16)---
+
+/**
+ * POST /sync/:token/chunk の1件分の入力(HTTP 層が Zod 検証済み observationSchema を camelCase に
+ * 整形して渡す)。observation トップレベルの source_ref は data-model.md の observed 固定キーセット内
+ * (observed.source_ref)と重複するため、Storage 層へは渡さない(task-15 のスコープ外。タスク報告参照)。
+ */
+export interface ChunkObservation {
+  externalRef: string;
+  fingerprint: string;
+  /** 固定キーセット(data-model.md「observed の固定キーセット」)。JSON文字列化して保存する。 */
+  observed: Record<string, unknown>;
+  /**
+   * observation のトップレベル任意フィールド(task-15-brief.md「もう1つの docs ギャップ」)。
+   * 未指定(null)時のデフォルト('normal')適用は Task 16 の canonical 生成側の責務。
+   */
+  category: Category | null;
+  confidence: number | null;
+}
+
+export type SyncStartResult = { kind: 'created'; session: SyncSessionRow } | { kind: 'conflict' };
+
+export interface SyncAppendOutcome { external_ref: string; outcome: 'inserted' | 'duplicate' }
 
 export interface Storage {
   // --- setup / organization ---
@@ -259,4 +283,45 @@ export interface Storage {
    * 基準列)。diff・accept-fingerprint の両方で使う。mirror_origin が null(手動作成)なら null。
    */
   getLatestCommittedObservation(scope: OrgScope, pid: string, id: string): Promise<TestCaseObservationRow | null>;
+
+  // --- sync(task-15-brief.md。start/chunk の前半のみ。commit(工程0-8)は Task 16)---
+
+  /**
+   * 遅延評価(sync-protocol.md「失効の執行モデル」): 対象 (project, origin) の active セッションで
+   * expires_at<=now のものを expired に倒す。origin=null はプロジェクト全体が対象(Cron sweep 等)。
+   * syncStart 自身はこれを呼ばず、同じ効果を持つ UPDATE を自身の batch に inline する(下記参照)。
+   */
+  syncExpireLapsed(scope: OrgScope, pid: string, origin: string | null, now: number): Promise<void>;
+  /**
+   * 新規 active セッションを開始する(sync-protocol.md「POST /sync/start」)。実装は
+   * batch([対象 origin の期限切れ active を expired に倒す UPDATE, 新規 active INSERT])を1トランザクション
+   * で実行し、部分一意索引 uq_active_session(project_id,origin) WHERE status='active' への違反を
+   * catch して conflict として返す(この UPDATE は syncExpireLapsed と同じ述語だが、INSERT と同一 batch
+   * に inline する必要があるため独立した実装を持つ)。
+   */
+  syncStart(
+    scope: OrgScope, pid: string, p: { token: string; origin: string; now: number; slidingMs: number },
+  ): Promise<SyncStartResult>;
+  /** token+pid で1件取得(project 境界)。存在しなければ null。 */
+  syncGetSession(scope: OrgScope, pid: string, token: string): Promise<SyncSessionRow | null>;
+  /**
+   * スライディング失効の延長(sync-protocol.md「スライディング失効」)。token は認証済み・存在確認済みの
+   * セッション PK であるため scope 引数を取らない(touchTokenLastUsed と同じ規約。GC-5 の追加の例外)。
+   */
+  syncTouchExpiry(token: string, expiresAt: number): Promise<void>;
+  /**
+   * 観測を追記する(sync-protocol.md「変化点のみ記録」+ task-15-brief.md「出現台帳」設計ノート)。
+   * ① committed-JOIN フェンス(committed セッション由来 OR 当セッション自身の観測)で対象 ref 群の
+   *    「最新観測 fingerprint」を取得する
+   * ② fingerprint が異なる/初出の ref のみ観測 INSERT 候補にする(1文あたり複数行に分割・
+   *    ON CONFLICT DO NOTHING。D1「1文あたり bind ≤ 100」対応。test_case_observations は1行11列の
+   *    フルバインドのため8行/文(88 bind)。brief の目安値「≤16行/文」は sync_seen(2列)側で採用し、
+   *    観測側は実列数から逆算した値に調整している。詳細・実測根拠は drizzle-storage.ts の実装コメント参照)
+   * ③ 受信した全 ref を sync_seen へ INSERT(16行/文・ON CONFLICT DO NOTHING)。Task 16 の
+   *    commit 工程3/4 は観測ではなくここを参照することで、変化なし ref の再出現を stale に誤判定しない
+   * ④ 観測 INSERT された ref → 'inserted'、それ以外(fingerprint 不変で観測を作らなかった ref)→ 'duplicate'
+   */
+  syncAppendObservations(
+    scope: OrgScope, pid: string, session: SyncSessionRow, obs: ChunkObservation[], now: number,
+  ): Promise<SyncAppendOutcome[]>;
 }

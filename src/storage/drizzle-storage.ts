@@ -2,12 +2,12 @@
 import { and, eq, ne, isNull, count, desc, sql, inArray } from 'drizzle-orm';
 import {
   organizations, users, sessions, projects, apiTokens, testCases, testCaseHistory,
-  testCaseIdentities, testCaseObservations, syncSessions,
-  type SessionRow, type TestCaseRow,
+  testCaseIdentities, testCaseObservations, syncSessions, syncSeen,
+  type SessionRow, type TestCaseRow, type SyncSessionRow,
 } from './schema';
 import type {
   Storage, OrgScope, SetupParams, CreateUserParams,
-  TestCaseFilters, Page, NewTestCaseColumns, NewHistoryEntry,
+  TestCaseFilters, Page, NewTestCaseColumns, NewHistoryEntry, ChunkObservation,
 } from './interface';
 import { encodeCursor, decodeCursor } from '../domain/cursor';
 import { applyBulkAction } from '../domain/testcase-rules';
@@ -56,6 +56,25 @@ function cursorPredicate(cursor: string | undefined, createdAtCol: any, idCol: a
   const decoded = decodeCursor(cursor);
   if (!decoded) return undefined;
   return sql`(${createdAtCol} < ${decoded.createdAt}) OR (${createdAtCol} = ${decoded.createdAt} AND ${idCol} < ${decoded.id})`;
+}
+
+// task-15-brief.md「D1 制約: 1 INSERT 文あたり ≤16 行(bind パラメータ上限)」。sync_seen/observation の
+// 複数行 INSERT を分割するための汎用ヘルパ(3アダプタ共通)。
+//
+// 実装ノート(brief の「16」との差分・タスク報告に明記): sync-protocol.md の実際の制約は
+// 「1文あたり bind ≤ 100」で、「chunk は ≤16行/文」はその帰結(1行あたり ~6列を想定した目安値)。
+// test_case_observations は id/test_case_id/external_ref/project_id/fingerprint/observed/sync_token/
+// origin/confidence/category/created_at の11列を1行ごとにフルバインドするため、16行だと176 bind と
+// なり ≤100 制約を超える(D1(miniflare)契約テストで実測: 16行×11列の INSERT で
+// "too many SQL variables" が発生することを確認済み)。そのため観測 INSERT は列数から逆算した
+// 8行/文(88 bind ≤ 100)に、sync_seen(sync_token, external_ref の2列のみ)は brief どおり16行/文
+// (32 bind)にする。
+const OBSERVATION_BATCH_ROWS = 8;
+const SEEN_BATCH_ROWS = 16;
+function toBatches<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
 }
 
 export function createDrizzleStorage(driver: StorageDriver): Storage {
@@ -590,6 +609,135 @@ export function createDrizzleStorage(driver: StorageDriver): Storage {
     },
 
     getLatestCommittedObservation,
+
+    // --- sync(task-15-brief.md。start/chunk の前半のみ。commit(工程0-8)は Task 16)---
+
+    // sync-protocol.md「失効の執行モデル(プライマリ: 遅延評価)」。syncStart 自身はこれを呼ばず、
+    // 同じ述語の UPDATE を自身の batch に inline する(下記 syncStart 参照。INSERT と同一トランザクション
+    // にする必要があるため独立実装にしている)。
+    async syncExpireLapsed(scope: OrgScope, pid: string, origin: string | null, now: number) {
+      const conditions = [
+        eq(syncSessions.projectId, pid),
+        eq(syncSessions.status, 'active'),
+        sql`${syncSessions.expiresAt} <= ${now}`,
+      ];
+      if (origin !== null) conditions.push(eq(syncSessions.origin, origin));
+      await db.update(syncSessions).set({ status: 'expired' }).where(and(...conditions)).run();
+    },
+
+    // sync-protocol.md「POST /sync/start」「実装は batch([期限切れ active→expired UPDATE, 新規 active
+    // INSERT])を1トランザクションで実行」。UPDATE を先に置くことで、genuinely 期限切れの旧セッションが
+    // 同一 origin に残っていても INSERT 前に expired へ倒れ、部分一意索引 uq_active_session に衝突しない
+    // (真に有効な active が残っている場合のみ、後続の INSERT がその索引違反で conflict になる)。
+    async syncStart(scope: OrgScope, pid: string, p: { token: string; origin: string; now: number; slidingMs: number }) {
+      const row = {
+        token: p.token,
+        projectId: pid,
+        origin: p.origin,
+        status: 'active',
+        startedAt: p.now,
+        expiresAt: p.now + p.slidingMs,
+        committedAt: null,
+        createdCount: null,
+        changedCount: null,
+        staledCount: null,
+      };
+      try {
+        await driver.batch([
+          db.update(syncSessions).set({ status: 'expired' }).where(and(
+            eq(syncSessions.projectId, pid),
+            eq(syncSessions.origin, p.origin),
+            eq(syncSessions.status, 'active'),
+            sql`${syncSessions.expiresAt} <= ${p.now}`,
+          )),
+          db.insert(syncSessions).values(row),
+        ]);
+      } catch (e) {
+        if (isUniqueViolation(e)) return { kind: 'conflict' as const };
+        throw e;
+      }
+      return { kind: 'created' as const, session: row as SyncSessionRow };
+    },
+
+    async syncGetSession(scope: OrgScope, pid: string, token: string) {
+      const [row] = await db.select().from(syncSessions)
+        .where(and(eq(syncSessions.token, token), eq(syncSessions.projectId, pid)));
+      return row ?? null;
+    },
+
+    // touchTokenLastUsed と同じ規約(GC-5 の追加の例外): token は認証済み・存在確認済みの PK のため
+    // scope 引数を取らない。
+    async syncTouchExpiry(token: string, expiresAt: number) {
+      await db.update(syncSessions).set({ expiresAt }).where(eq(syncSessions.token, token)).run();
+    },
+
+    // sync-protocol.md「変化点のみ記録」+ task-15-brief.md「出現台帳」設計ノート(⚠ 設計上の重要ノート)。
+    async syncAppendObservations(scope: OrgScope, pid: string, session: SyncSessionRow, obs: ChunkObservation[], now: number) {
+      if (obs.length === 0) return [];
+      const refs = [...new Set(obs.map((o) => o.externalRef))];
+
+      // ① committed-JOIN フェンス(sync-protocol.md「committed-JOIN フェンス」): committed セッション由来
+      // または当セッション自身の観測のみを対象に、ref ごとの最新 fingerprint を求める(1クエリ)。
+      const latestRows = await db
+        .select({ externalRef: testCaseObservations.externalRef, fingerprint: testCaseObservations.fingerprint })
+        .from(testCaseObservations)
+        .innerJoin(syncSessions, eq(syncSessions.token, testCaseObservations.syncToken))
+        .where(and(
+          eq(testCaseObservations.projectId, pid),
+          eq(testCaseObservations.origin, session.origin),
+          inArray(testCaseObservations.externalRef, refs),
+          sql`(${syncSessions.status} = 'committed' OR ${syncSessions.token} = ${session.token})`,
+        ))
+        .orderBy(desc(testCaseObservations.createdAt), desc(testCaseObservations.id));
+
+      const latestFingerprintByRef = new Map<string, string>();
+      for (const r of latestRows) {
+        if (!latestFingerprintByRef.has(r.externalRef)) latestFingerprintByRef.set(r.externalRef, r.fingerprint);
+      }
+
+      // ② fingerprint が異なる/初出の ref のみ観測 INSERT 候補にする(容量設計の根幹 = 変化点のみ記録)。
+      const changedRefs = new Set<string>();
+      const obsRows: Record<string, unknown>[] = [];
+      for (const o of obs) {
+        if (latestFingerprintByRef.get(o.externalRef) === o.fingerprint) continue;
+        changedRefs.add(o.externalRef);
+        obsRows.push({
+          id: uuid(),
+          testCaseId: null, // 新規ケースは commit 工程で backfill(data-model.md)
+          externalRef: o.externalRef,
+          projectId: pid,
+          fingerprint: o.fingerprint,
+          observed: JSON.stringify(o.observed),
+          syncToken: session.token,
+          origin: session.origin,
+          confidence: o.confidence,
+          category: o.category,
+          createdAt: now,
+        });
+      }
+
+      // ③ 受信した全 ref(重複除去済み)を出現台帳へ。commit 工程3/4(Task 16)は観測ではなくここを
+      // 参照することで、変化なし ref(観測行が作られない)の再出現を stale に誤判定しない(⚠ 設計ノート)。
+      const seenRows = refs.map((r) => ({ syncToken: session.token, externalRef: r }));
+
+      // 各チャンクを個別の driver.batch() 呼び出し(1呼び出し=1文)として実行する。各文は
+      // ON CONFLICT DO NOTHING で冪等・自己完結のため、単一の巨大トランザクションにまとめなくても
+      // 途中失敗時の不変条件("chunk 失敗は観測が足りないだけ"。sync-protocol.md)は保たれる。
+      for (const batch of toBatches(obsRows, OBSERVATION_BATCH_ROWS)) {
+        await driver.batch([db.insert(testCaseObservations).values(batch).onConflictDoNothing()]);
+      }
+      for (const batch of toBatches(seenRows, SEEN_BATCH_ROWS)) {
+        await driver.batch([db.insert(syncSeen).values(batch).onConflictDoNothing()]);
+      }
+
+      // ④ outcome は①の「変化があったか」のみを根拠にする(INSERT の実際の affected 行数ではない)。
+      // 同一チャンク再送・並行二重処理は ON CONFLICT DO NOTHING が DB 側で吸収するが、outcome の分類自体は
+      // 常に①のフェンス付き比較で決まるため、再送であっても一貫した 'duplicate' を返す。
+      return obs.map((o) => ({
+        external_ref: o.externalRef,
+        outcome: (changedRefs.has(o.externalRef) ? 'inserted' : 'duplicate') as 'inserted' | 'duplicate',
+      }));
+    },
   } satisfies Storage;
 
   return storage;

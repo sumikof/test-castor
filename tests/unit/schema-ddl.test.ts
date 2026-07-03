@@ -12,10 +12,10 @@ describe('DDL(生成マイグレーション)', () => {
     db.exec(`INSERT INTO organizations (id,name,created_at,updated_at) VALUES ('o1','org',1,1)`);
     db.exec(`INSERT INTO projects (id,organization_id,name,created_at,updated_at) VALUES ('p1','o1','proj',1,1)`);
   };
-  it('11 テーブルが作成される', () => {
+  it('12 テーブルが作成される', () => {
     const names = db.prepare(`SELECT name FROM sqlite_master WHERE type='table'`).all().map((r: any) => r.name);
     for (const t of ['organizations','users','sessions','projects','test_cases','test_case_identities',
-      'test_case_observations','sync_sessions','sync_staging','api_tokens','test_case_history']) {
+      'test_case_observations','sync_sessions','sync_staging','sync_seen','api_tokens','test_case_history']) {
       expect(names).toContain(t);
     }
   });
@@ -50,5 +50,23 @@ describe('DDL(生成マイグレーション)', () => {
                  VALUES (?,?,?,?,?,?,?,?)`;
     db.prepare(ins).run('ob1', 'ref', 'p1', 'fp', '{}', 's1', 'o', 1);
     expect(() => db.prepare(ins).run('ob2', 'ref', 'p1', 'fp', '{}', 's1', 'o', 2)).toThrow(/UNIQUE/);
+  });
+
+  // task-15-brief.md「Step 1」: sync_seen(出現台帳)の DDL テスト2件(テーブル存在は上の
+  // 「12 テーブルが作成される」に統合済み。ここでは一意制約 uq_seen(sync_token,external_ref)を検証する)。
+  it('sync_seen テーブルが作成される(出現台帳)', () => {
+    const names = db.prepare(`SELECT name FROM sqlite_master WHERE type='table'`).all().map((r: any) => r.name);
+    expect(names).toContain('sync_seen');
+  });
+
+  it('一意制約: 出現台帳の (sync_token,external_ref) は一意(uq_seen)。別 token・別 ref は共存できる', () => {
+    insertBase();
+    db.exec(`INSERT INTO sync_sessions (token,project_id,origin,status,started_at,expires_at) VALUES ('s1','p1','o','active',1,10)`);
+    db.exec(`INSERT INTO sync_seen (sync_token,external_ref) VALUES ('s1','ref1')`);
+    expect(() => db.exec(`INSERT INTO sync_seen (sync_token,external_ref) VALUES ('s1','ref1')`)).toThrow(/UNIQUE/);
+    // 別 ref・別 token は問題なく共存できる(s2 は別 origin にして uq_active_session と無関係にする)
+    db.exec(`INSERT INTO sync_sessions (token,project_id,origin,status,started_at,expires_at) VALUES ('s2','p1','o2','active',11,20)`);
+    db.exec(`INSERT INTO sync_seen (sync_token,external_ref) VALUES ('s1','ref2')`);
+    db.exec(`INSERT INTO sync_seen (sync_token,external_ref) VALUES ('s2','ref1')`);
   });
 });

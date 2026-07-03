@@ -24,7 +24,7 @@ export type RawExec = (sqlText: string) => Promise<void>;
  * 統合テストにも再利用される想定のため全テーブルを対象にする。
  */
 const WIPE_ORDER = [
-  'test_case_history', 'test_case_observations', 'sync_staging', 'sync_sessions',
+  'test_case_history', 'test_case_observations', 'sync_seen', 'sync_staging', 'sync_sessions',
   'test_case_identities', 'test_cases', 'api_tokens', 'sessions', 'projects', 'users', 'organizations',
 ];
 

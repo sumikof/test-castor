@@ -17,6 +17,7 @@ import { usersRoutes } from './api/users';
 import { projectsRoutes } from './api/projects';
 import { tokensRoutes } from './api/tokens';
 import { testCasesRoutes } from './api/testcases';
+import { syncRoutes } from './api/sync';
 
 export interface AppDeps {
   storage: Storage;
@@ -58,16 +59,17 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   });
 
   // /api/v1 配下のルート登録。以後のタスクがここに追記していく(Task 8: setup/auth、Task 9: users、Task 10: projects、
-  // Task 11: tokens、Task 13: testcases)。tokensRoutes/testCasesRoutes は projectsRoutes と同じ
-  // '/api/v1/projects' 配下に '/:pid/tokens'・'/:pid/testcases' 等のサブパスとしてマウントする
-  // (Hono は同一 base path への複数回の .route() 呼び出しをサポートし、パスが重複しない限り
-  // ルーティングテーブルにマージされる)。
+  // Task 11: tokens、Task 13: testcases、Task 15: sync start/chunk)。tokensRoutes/testCasesRoutes/
+  // syncRoutes は projectsRoutes と同じ '/api/v1/projects' 配下に '/:pid/tokens'・'/:pid/testcases'・
+  // '/:pid/sync/...' 等のサブパスとしてマウントする(Hono は同一 base path への複数回の .route() 呼び出しを
+  // サポートし、パスが重複しない限りルーティングテーブルにマージされる)。
   app.route('/api/v1/setup', setupRoutes);
   app.route('/api/v1/auth', authRoutes);
   app.route('/api/v1/users', usersRoutes);
   app.route('/api/v1/projects', projectsRoutes);
   app.route('/api/v1/projects', tokensRoutes);
   app.route('/api/v1/projects', testCasesRoutes);
+  app.route('/api/v1/projects', syncRoutes);
 
   app.onError(errorMiddleware);
   app.notFound(() => {

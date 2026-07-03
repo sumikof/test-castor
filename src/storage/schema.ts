@@ -102,6 +102,12 @@ export const testCaseObservations = sqliteTable('test_case_observations', {
   syncToken: text('sync_token').notNull(),
   origin: text('origin').notNull(),
   confidence: real('confidence'), // 実装ノート参照(docs 差分)
+  // task-15-brief.md「もう1つの docs ギャップ」: observed 固定キーセットに category が無いが
+  // test_cases.category は NOT NULL のため、observation のトップレベル任意フィールドとして追加。
+  // confidence 列と同じ位置づけ(data-model.md/sync-protocol.md 未記載。Task 23 で docs 反映)。
+  // 複数の書込経路を持つ test_cases.category と異なり、この列は syncAppendObservations の
+  // 単一書込経路(Zod 検証済み入力のみ)のため CHECK 制約は付けず Zod のみで縛る(二重防御は省略)。
+  category: text('category'),
   createdAt: integer('created_at').notNull(),
 }, (t) => [
   uniqueIndex('uq_obs_idem').on(t.externalRef, t.origin, t.syncToken, t.fingerprint),
@@ -126,6 +132,16 @@ export const syncSessions = sqliteTable('sync_sessions', {
   index('ix_sync_project_committed').on(t.projectId, t.status, t.committedAt),
   check('ck_sync_status', sql`${t.status} IN ('active','committed','expired')`),
 ]);
+
+// task-15-brief.md「出現台帳」: chunk は変化点のみ観測を記録するため、変化なし ref は観測行が
+// 作られない。commit 工程3/4(Task 16)の last_seen/stale 判定を観測ではなくこの台帳に向けることで、
+// 「chunk 追記専用」「変化点のみ記録」「stale 正確性」の3不変条件を同時に満たす(⚠ 設計ノート参照)。
+// data-model.md/sync-protocol.md 未記載の新テーブル(Task 23 で docs 反映予定)。sync_staging と同じく
+// セッション寿命の作業データ(確定/失効後にパージ対象)のため PK は持たず一意索引のみで冪等性を担保する。
+export const syncSeen = sqliteTable('sync_seen', {
+  syncToken: text('sync_token').notNull().references(() => syncSessions.token),
+  externalRef: text('external_ref').notNull(),
+}, (t) => [uniqueIndex('uq_seen').on(t.syncToken, t.externalRef)]);
 
 export const syncStaging = sqliteTable('sync_staging', {
   syncToken: text('sync_token').notNull().references(() => syncSessions.token),
@@ -163,6 +179,7 @@ export type TestCaseRow = typeof testCases.$inferSelect;
 export type TestCaseIdentityRow = typeof testCaseIdentities.$inferSelect;
 export type TestCaseObservationRow = typeof testCaseObservations.$inferSelect;
 export type SyncSessionRow = typeof syncSessions.$inferSelect;
+export type SyncSeenRow = typeof syncSeen.$inferSelect;
 export type SyncStagingRow = typeof syncStaging.$inferSelect;
 export type ApiTokenRow = typeof apiTokens.$inferSelect;
 export type TestCaseHistoryRow = typeof testCaseHistory.$inferSelect;
