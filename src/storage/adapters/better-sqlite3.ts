@@ -17,8 +17,11 @@ export function createBetterSqlite3Storage(path = ':memory:') {
   const db = drizzle(sqlite);
   const storage = createDrizzleStorage({
     db,
+    // review round 1(CRITICAL OCC concurrency): 各文の affected 行数(better-sqlite3 の
+    // RunResult.changes)を実行順に集めて返す。呼び出し側(drizzle-storage.ts の patchTestCase 等)は
+    // これで OCC 対象 UPDATE が実際に何行へ命中したかを検査する。
     async batch(queries: AnyQuery[]) {
-      sqlite.transaction(() => { for (const q of queries) q.run(); })();
+      return sqlite.transaction(() => queries.map((q) => (q.run() as { changes: number }).changes))();
     },
     async rawExec(sqlText: string) { sqlite.exec(sqlText); },
   });

@@ -29,9 +29,12 @@ export async function createLibsqlStorage(url = ':memory:') {
   const db = drizzle(client);
   const storage = createDrizzleStorage({
     db,
+    // review round 1(CRITICAL OCC concurrency): ResultSet.rowsAffected(libSQL の SQLite changes()
+    // 相当)を実行順に返す。呼び出し側はこれで OCC 対象 UPDATE の命中行数を検査する。
     async batch(queries: AnyQuery[]) {
-      if (queries.length === 0) return;
-      await (db as any).batch(queries);
+      if (queries.length === 0) return [];
+      const results = await (db as any).batch(queries);
+      return results.map((r: any) => r.rowsAffected as number);
     },
     async rawExec(sqlText: string) { await client.executeMultiple(sqlText); },
   });

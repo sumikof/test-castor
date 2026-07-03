@@ -429,6 +429,50 @@ export function runStorageContract(name: string, factory: () => Promise<Contract
       expect(notFound).toEqual({ kind: 'not_found' });
     });
 
+    // review round 1(CRITICAL OCC concurrency)回帰テスト。2つのリクエストが両方とも同じ version(=1)を
+    // 読んでから競走する状況を、逐次呼び出しで決定的に再現する: 「勝者」が version=1→2 に書き込んだ後、
+    // 「敗者」が(自分がまだ version=1 だと思ったまま)同じ expectedVersion=1 で書き込みを試みる。
+    // 修正前は敗者側の UPDATE の WHERE version=1 が実際には0行にしか一致しないにもかかわらず、対になる
+    // history INSERT が無条件に実行され、`{...current, ...setValues}` で組み立てた捏造行を伴う
+    // {kind:'ok'} が返っていた(=偽の成功 + phantom history)。本テストは敗者が必ず {kind:'conflict'} を
+    // 返すこと、かつ history 行数が敗者の呼び出し前後で増えないこと(phantom entry 無し)を固定する。
+    it('testcases: review round 1 回帰 — patchTestCase は stale expectedVersion で history を増やさず必ず conflict を返す(phantom-history + false-success ガード)', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-patch-race' }, now);
+      const created = await ctx.storage.createTestCaseManual(scope, p.id, tcInput({ title: 'race-v1' }), historyEntry(), now);
+      expect(created.version).toBe(1);
+
+      // 「勝者」: version=1 を expectedVersion として書き込み、version=2 に進む。
+      const winner = await ctx.storage.patchTestCase(scope, p.id, created.id, {
+        expectedVersion: 1,
+        columnValues: { title: 'winner-title' },
+        ownershipTransition: false,
+        historyEntries: [{ actor: 'user:winner', action: 'updated', delta: { title: { before: 'race-v1', after: 'winner-title' } } }],
+        now: now + 1,
+      });
+      expect(winner.kind).toBe('ok');
+      if (winner.kind !== 'ok') throw new Error('unreachable');
+      expect(winner.row.version).toBe(2);
+
+      const historyCountBefore = (await ctx.storage.listHistory(scope, p.id, created.id, { limit: 50 })).total;
+
+      // 「敗者」: 勝者の書き込みを知らないまま、同じ stale expectedVersion=1 で別の変更を試みる。
+      const loser = await ctx.storage.patchTestCase(scope, p.id, created.id, {
+        expectedVersion: 1,
+        columnValues: { title: 'loser-title' },
+        ownershipTransition: false,
+        historyEntries: [{ actor: 'user:loser', action: 'updated', delta: { title: { before: 'race-v1', after: 'loser-title' } } }],
+        now: now + 2,
+      });
+      expect(loser).toEqual({ kind: 'conflict' }); // ok ではない(偽の成功なし)
+
+      const historyCountAfter = (await ctx.storage.listHistory(scope, p.id, created.id, { limit: 50 })).total;
+      expect(historyCountAfter).toBe(historyCountBefore); // phantom entry が増えていない
+
+      const finalRow = await ctx.storage.getTestCase(scope, p.id, created.id);
+      expect(finalRow?.title).toBe('winner-title'); // 敗者の変更は適用されない
+      expect(finalRow?.version).toBe(2); // 敗者による余計な version bump も無い
+    });
+
     it('testcases: archiveTestCase は冪等(2回目は同一状態を返し history が増えない)。machine 所有 draft の archive は ownership を human に遷移する(複合不変条件)', async () => {
       const p = await ctx.storage.createProject(scope, { name: 'proj-archive' }, now);
       const created = await ctx.storage.createTestCaseManual(scope, p.id, tcInput({ title: 'to-archive' }), historyEntry(), now);
@@ -563,6 +607,48 @@ export function runStorageContract(name: string, factory: () => Promise<Contract
       expect(notFound).toEqual({ kind: 'not_found' });
     });
 
+    // review round 1(CRITICAL OCC concurrency)回帰テスト。patchTestCase と同じ形の「敗者」再現
+    // (コメント詳細はそちらの回帰テスト参照)。acceptFingerprint は no_drift 判定を OCC より先に行うため、
+    // 「敗者」の再試行の直前に drift を再度1へ戻す(no_drift ではなく conflict パスを純粋に検証するため)。
+    it('testcases: review round 1 回帰 — acceptFingerprint は stale expectedVersion で history を増やさず必ず conflict を返す(phantom-history + false-success ガード)', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-fp-race' }, now);
+      const created = await ctx.storage.createTestCaseManual(scope, p.id, tcInput({ title: 'fp-race' }), historyEntry(), now);
+      await ctx.rawExec(`UPDATE test_cases SET drift=1, fingerprint='old-fp', mirror_origin='discovery-v1' WHERE id='${created.id}'`);
+      await ctx.rawExec(
+        `INSERT INTO sync_sessions (token, project_id, origin, status, started_at, expires_at, committed_at) ` +
+        `VALUES ('sess-fp-race', '${p.id}', 'discovery-v1', 'committed', ${now}, ${now + 1000}, ${now})`,
+      );
+      await ctx.rawExec(
+        `INSERT INTO test_case_observations (id, test_case_id, external_ref, project_id, fingerprint, observed, sync_token, origin, created_at) ` +
+        `VALUES ('obs-fp-race', '${created.id}', 'ext-1', '${p.id}', 'new-fp', '{"given":"g","when":"w","then":"t","parameters":[]}', 'sess-fp-race', 'discovery-v1', ${now + 1})`,
+      );
+
+      const current = await ctx.storage.getTestCase(scope, p.id, created.id);
+      expect(current!.version).toBe(1);
+
+      // 「勝者」: expectedVersion=1 で drift を解消し version=2 に進む。
+      const winner = await ctx.storage.acceptFingerprint(scope, p.id, created.id, 1, 'user:winner', now + 1);
+      expect(winner.kind).toBe('ok');
+      if (winner.kind !== 'ok') throw new Error('unreachable');
+      expect(winner.row.version).toBe(2);
+
+      const historyCountBefore = (await ctx.storage.listHistory(scope, p.id, created.id, { limit: 50 })).total;
+
+      // drift を再度立てる(勝者の成功で drift=0 になっているため。no_drift ではなく OCC の
+      // conflict パスを検証したいので、drift の前提条件だけ満たしておく)。
+      await ctx.rawExec(`UPDATE test_cases SET drift=1 WHERE id='${created.id}'`);
+
+      // 「敗者」: 勝者の書き込みを知らないまま、同じ stale expectedVersion=1 で再試行する。
+      const loser = await ctx.storage.acceptFingerprint(scope, p.id, created.id, 1, 'user:loser', now + 2);
+      expect(loser).toEqual({ kind: 'conflict' }); // ok ではない(偽の成功なし)
+
+      const historyCountAfter = (await ctx.storage.listHistory(scope, p.id, created.id, { limit: 50 })).total;
+      expect(historyCountAfter).toBe(historyCountBefore); // phantom entry が増えていない
+
+      const finalRow = await ctx.storage.getTestCase(scope, p.id, created.id);
+      expect(finalRow?.version).toBe(2); // 敗者による余計な version bump も無い
+    });
+
     it('testcases: listIdentities は test_case_id+project_id スコープの全 identity を返す(ページングなし)', async () => {
       const p = await ctx.storage.createProject(scope, { name: 'proj-ident' }, now);
       const created = await ctx.storage.createTestCaseManual(scope, p.id, tcInput({ title: 'ident' }), historyEntry(), now);
@@ -641,6 +727,42 @@ export function runStorageContract(name: string, factory: () => Promise<Contract
       const latest = await ctx.storage.getLatestCommittedObservation(scope, p.id, created.id);
       expect(latest?.id).toBe('obs-new');
       expect(latest?.fingerprint).toBe('fp-new');
+    });
+
+    // review round 1(Important #2)。listObservations の committed-JOIN フェンス検証(上の
+    // 「active セッションは除外」テスト)と対になる getLatestCommittedObservation 側のテストが
+    // 無かったため追加する。同一テストケースに対して committed セッション由来の観測と active
+    // セッション由来の観測を両方仕込み、active 側の created_at をより新しくする(除外が効いていなければ
+    // ORDER BY created_at DESC で active 側が誤って「最新」として返ってしまうため、除外の有無を
+    // 確実に区別できる)。GET /diff・accept-fingerprint の fingerprint 採用元となる関数のため重要。
+    it('testcases: getLatestCommittedObservation は active セッション由来の観測を除外する(同一 origin でより新しくても committed 側を返す)', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-latest-active-excl' }, now);
+      const created = await ctx.storage.createTestCaseManual(scope, p.id, tcInput({ title: 'latest-active-excl' }), historyEntry(), now);
+      await ctx.rawExec(`UPDATE test_cases SET mirror_origin='discovery-v1' WHERE id='${created.id}'`);
+
+      // committed セッション由来の観測(より古い created_at)
+      await ctx.rawExec(
+        `INSERT INTO sync_sessions (token, project_id, origin, status, started_at, expires_at, committed_at) ` +
+        `VALUES ('sess-committed-excl', '${p.id}', 'discovery-v1', 'committed', ${now}, ${now + 1000}, ${now})`,
+      );
+      await ctx.rawExec(
+        `INSERT INTO test_case_observations (id, test_case_id, external_ref, project_id, fingerprint, observed, sync_token, origin, created_at) ` +
+        `VALUES ('obs-committed-excl', '${created.id}', 'ext-1', '${p.id}', 'fp-committed', '{}', 'sess-committed-excl', 'discovery-v1', ${now + 1})`,
+      );
+
+      // active セッション由来の観測(同一 origin・より新しい created_at)
+      await ctx.rawExec(
+        `INSERT INTO sync_sessions (token, project_id, origin, status, started_at, expires_at) ` +
+        `VALUES ('sess-active-excl', '${p.id}', 'discovery-v1', 'active', ${now}, ${now + 1000})`,
+      );
+      await ctx.rawExec(
+        `INSERT INTO test_case_observations (id, test_case_id, external_ref, project_id, fingerprint, observed, sync_token, origin, created_at) ` +
+        `VALUES ('obs-active-excl', '${created.id}', 'ext-1', '${p.id}', 'fp-active', '{}', 'sess-active-excl', 'discovery-v1', ${now + 2})`,
+      );
+
+      const latest = await ctx.storage.getLatestCommittedObservation(scope, p.id, created.id);
+      expect(latest?.id).toBe('obs-committed-excl'); // active 由来(より新しい)は除外される
+      expect(latest?.fingerprint).toBe('fp-committed');
     });
   });
 }

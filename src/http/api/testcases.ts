@@ -26,7 +26,7 @@ import {
   toIdentityJson, toObservationJson, toDiffJson, toAcceptFingerprintJson,
 } from './serializers';
 import { renderGherkin } from '../../domain/gherkin';
-import { computeHumanPatch, jsonDeepEqual } from '../../domain/testcase-rules';
+import { computeHumanPatch } from '../../domain/testcase-rules';
 import { buildHistoryEntries } from '../../domain/history-delta';
 
 const viewerUp = requireAuth({ modes: ['session', 'token'], minRole: 'viewer' });
@@ -182,18 +182,13 @@ export const testCasesRoutes = new Hono<AppEnv>()
     });
     if (!patchResult.ok) throw new AppError('VALIDATION_FAILED', 422, 'invalid status transition');
 
-    // source_ref は data-model.md「人間所有列」に含まれず computeHumanPatch の対象外
-    // (domain/testcase-rules.ts の注記参照)。ここで別途カラム代入する。実際に値が変化した場合のみ
-    // SET 対象にする(バージョン bump/ownership 遷移/history の対象にはしない)。
-    let sourceRefColumnValue: string | null | undefined;
-    if (input.source_ref !== undefined) {
-      const currentSourceRef = current.sourceRef === null ? null : JSON.parse(current.sourceRef);
-      if (!jsonDeepEqual(currentSourceRef, input.source_ref)) {
-        sourceRefColumnValue = input.source_ref === null ? null : JSON.stringify(input.source_ref);
-      }
-    }
-
-    const noChanges = Object.keys(patchResult.changes).length === 0 && sourceRefColumnValue === undefined;
+    // review round 1(Important #3): source_ref は data-model.md「列の二分」の人間所有列に含まれない
+    // provenance 列であり、PATCH では一切書き込まない(値は作成時にのみ確定する。domain/testcase-rules.ts
+    // の HUMAN_FIELDS/注記参照)。以前はここで computeHumanPatch を迂回して別途カラム代入していたが、
+    // それだと version bump も history 記録も無いまま source_ref だけが変わる監査ギャップになっていた
+    // ため撤去した。patchTestCaseInput のスキーマは互換性のため source_ref を引き続き受理するが、
+    // ここでは意図的に無視する(input.source_ref は使わない。将来 T23 でスキーマ自体を締める可能性がある)。
+    const noChanges = Object.keys(patchResult.changes).length === 0;
     if (noChanges) {
       // no-op PATCH(data-model.md「同値PATCH(no-op)では遷移しない」): version を bump せず、
       // 書き込みも行わず現行値を 200 で返す。OCC の版比較はここでは行わない(何も書かないため
@@ -203,7 +198,6 @@ export const testCasesRoutes = new Hono<AppEnv>()
     }
 
     const columnValues: Record<string, unknown> = { ...patchResult.columnValues };
-    if (sourceRefColumnValue !== undefined) columnValues.sourceRef = sourceRefColumnValue;
 
     const now = deps.now();
     const historyEntries = buildHistoryEntries({

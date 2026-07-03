@@ -63,8 +63,9 @@ export interface NewHistoryEntry {
 // --- test cases 書き込み系(task-14-brief.md「Produces(Storage 追加分)」)---
 
 /**
- * patchTestCase の結果種別。changed rows が 0 の場合、呼び出し側は id の存在確認により
- * conflict(存在するが version 不一致)/ not_found(そもそも存在しない)を判別する。
+ * patchTestCase の結果種別。not_found は書き込み前の存在チェックで、conflict/ok は書き込み(UPDATE)の
+ * 実際の affected 行数(0 行 = conflict、1 行以上 = ok)で判別する。事前チェックのスナップショットと
+ * expectedVersion の一致・不一致では判別しない(review round 1: CRITICAL OCC concurrency 参照)。
  */
 export type PatchResult = { kind: 'ok'; row: TestCaseRow } | { kind: 'conflict' } | { kind: 'not_found' };
 
@@ -72,11 +73,20 @@ export type PatchResult = { kind: 'ok'; row: TestCaseRow } | { kind: 'conflict' 
 export interface PatchTestCaseParams {
   /** If-Match から parse した version(存在しない場合は呼び出し側が 428 を返し、ここへは来ない)。 */
   expectedVersion: number;
-  /** domain.computeHumanPatch の columnValues(実変更があった人間所有列のみ。version/ownership を含む)。 */
+  /**
+   * domain.computeHumanPatch の columnValues(実変更があった人間所有列のみ)。version/ownership も
+   * 含まれるが、これらは呼び出し元のスナップショット(current.version+1 等)から計算された値であり、
+   * drizzle-storage.ts の実装はこの2キーを無視して UPDATE 文内で現在行を基準に SQL 側で導出する
+   * (version=version+1 / ownershipTransition なら CASE 式)。並行更新下でも自己検証的に正しい書き込みに
+   * するための意図的な設計(review round 1: CRITICAL OCC concurrency 参照)。
+   */
   columnValues: Record<string, unknown>;
-  /** true の場合、SET 句に ownership='human' を含める(machine→human の不可逆遷移。同一 UPDATE 文)。 */
+  /**
+   * true の場合、SET 句に「ownership が machine なら human へ遷移」の CASE 式を含める
+   * (machine→human の不可逆遷移。同一 UPDATE 文。現在行基準で導出するため 'human' 固定値は使わない)。
+   */
   ownershipTransition: boolean;
-  /** 同一 UPDATE の成功時にのみ追記する TestCaseHistory 行(0件・1件・2件のいずれもありうる)。 */
+  /** UPDATE が実際に1行以上へ命中したときにのみ追記される TestCaseHistory 行(0件・1件・2件のいずれもありうる)。 */
   historyEntries: NewHistoryEntry[];
   now: number;
 }
@@ -172,23 +182,42 @@ export interface Storage {
     scope: OrgScope, pid: string, id: string, page: Page,
   ): Promise<Paged<TestCaseHistoryRow & { actorDisplay: string }>>;
 
-  // --- test cases 書き込み系(task-14-brief.md)---
+  // --- test cases 書き込み系(task-14-brief.md。OCC 系2メソッドの自己検証戦略は
+  // review round 1: CRITICAL OCC concurrency で確定。詳細な理由は drizzle-storage.ts の実装コメント参照)---
   /**
    * OCC 付き単一 UPDATE(apis/testcases.md「PATCH /testcases/:id」・data-model.md「OCC」)。
-   * SET は columnValues(人間所有列の実変更分)+ human_updated_at=now + ( ownershipTransition なら
-   * ownership='human' )を1つの UPDATE 文にまとめ、WHERE id=:id AND project_id=:pid AND
+   *
+   * 事前チェック(getTestCase)は「id が存在するか」の判定(not_found)にのみ使い、conflict の判定には
+   * 使わない(事前チェックのスナップショットと expectedVersion の一致・不一致は、2つのリクエストが
+   * 同じ version を読んでから競走する真の並行レースを検出できないため)。
+   *
+   * SET は columnValues(人間所有列の実変更分。version/ownership は無視する)+ human_updated_at=now +
+   * version=version+1(現在行基準の SQL 相対式)+ ( ownershipTransition なら ownership を machine→human
+   * へ遷移させる CASE 式)を1つの UPDATE 文にまとめ、WHERE id=:id AND project_id=:pid AND
    * version=:expectedVersion で原子的に排他する。No-op PATCH(changes 空)はこのメソッドを呼ばず
    * 呼び出し側(ルートハンドラ)が現在値を 200 で返す契約(このメソッドは常に「書き込みを試みる」)。
-   * 変更行数が 0 の場合、id の存在有無で conflict(存在するが version 不一致)/ not_found を判別する。
-   * historyEntries は UPDATE 成功時にのみ追記する(失敗時は 0 行のまま。history の追記専用性を保つ)。
+   *
+   * conflict/ok の判定は UPDATE の実際の affected 行数(driver.batch の戻り値。事前チェック済みなので
+   * 0行=version 不一致による conflict、1行以上=ok)のみを根拠にする。historyEntries は同一 batch 内で
+   * changes()>0 のときにのみ実際に INSERT されるガード付き文として渡す(UPDATE が0行でも history だけが
+   * 増える phantom entry を防ぐ)。ok の場合、返す row は書き込み後に再 SELECT した実際の値(SQL 側で
+   * 導出した version/ownership を含む)。
    */
   patchTestCase(scope: OrgScope, pid: string, id: string, p: PatchTestCaseParams): Promise<PatchResult>;
   /**
    * アーカイブ(apis/testcases.md「DELETE /testcases/:id」、スペック D-02: PATCH のセマンティック
-   * エイリアス)。OCC 不要・冪等(既に archived なら現状をそのまま返す。UPDATE/history 共に発生しない)。
-   * 未 archived の場合のみ status='archived'(+ machine 所有なら ownership='human'。複合不変条件
+   * エイリアス)。OCC 不要(WHERE に version 条件を含めない)・冪等(既に archived なら現状をそのまま返す。
+   * UPDATE/history 共に発生しない)。
+   *
+   * 未 archived の場合、status='archived' + version=version+1(現在行基準の SQL 相対式)+
+   * ( machine 所有なら ownership を human へ遷移させる CASE 式。複合不変条件
    * `status IN ('approved','archived') ⇒ ownership='human'` を満たすため)+ history(status_changed)を
-   * 1つの driver.batch で書く。id が存在しなければ null。
+   * 1つの driver.batch で書く。version/ownership を事前チェックのスナップショットではなく現在行基準の
+   * SQL 式で導出するのは、事前チェックと UPDATE の間に着地した並行更新(例: 別リクエストの
+   * patchTestCase)を古い値で巻き戻さないため。WHERE には `status != 'archived'` も埋め込み、2つの同時
+   * archive リクエストが競走しても後着側の UPDATE は0行に短絡する(history もガードにより増えない)。
+   * affected 行数は分岐に使わない(0行=既に他方が archived 済みでも、望んだ終状態には到達しているため
+   * 常に成功として現在値を返す。never 409)。id が存在しなければ null。
    */
   archiveTestCase(scope: OrgScope, pid: string, id: string, actor: string, now: number): Promise<TestCaseRow | null>;
   /**
@@ -202,11 +231,16 @@ export interface Storage {
   ): Promise<BulkActionResult>;
   /**
    * drift 解消(apis/testcases.md「POST /testcases/:id/accept-fingerprint」)。OCC 付き。
-   * 現在行が存在しなければ not_found、drift=false なら no_drift(OCC より前に判定する)。
+   * 現在行が存在しなければ not_found、drift=false なら no_drift(この判定は version と独立した
+   * 業務ルール上の前提条件チェックのため、事前チェックのままでよい。OCC のすり抜けとは無関係)。
+   *
    * drift=true の場合、getLatestCommittedObservation(mirror_origin 由来)の fingerprint を採用し、
-   * drift=0・version=expectedVersion+1・human_updated_at=now を1つの UPDATE 文(WHERE version=
-   * expectedVersion)で書く。変更行数が 0 なら conflict(存在は直前に確認済みのため not_found にはならない)。
-   * 成功時のみ TestCaseHistory に status_changed を追記する。
+   * drift=0・version=version+1(現在行基準の SQL 相対式。expectedVersion+1 というスナップショット値では
+   * ない)・human_updated_at=now を1つの UPDATE 文(WHERE version=expectedVersion)で書く。
+   *
+   * conflict/ok の判定は patchTestCase と同じく UPDATE の実際の affected 行数(driver.batch の戻り値)
+   * のみを根拠にする(0行=conflict。存在は直前に確認済みのため not_found にはならない)。history は
+   * 同一 batch 内で changes()>0 のときにのみ実際に INSERT されるガード付き文として status_changed を渡す。
    */
   acceptFingerprint(
     scope: OrgScope, pid: string, id: string, expectedVersion: number, actor: string, now: number,

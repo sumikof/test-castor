@@ -212,6 +212,53 @@ describe('統合: テストケース書き込み系 API', () => {
       expect(body.version).toBe(5); // 不変のまま
     });
 
+    // review round 1(Important #3)。source_ref は data-model.md「列の二分」の人間所有列に含まれない
+    // provenance 列であり、PATCH では書き込まれない(値は作成時にのみ確定する)。修正前はここで
+    // computeHumanPatch を迂回して別途カラム代入しており、version bump も history 記録も無いまま
+    // source_ref だけが変わる監査ギャップだった。
+    it('source_ref は PATCH で書き込まれない(provenance 列。data-model.md「列の二分」): source_ref のみの PATCH は no-op(200・version不変・履歴増えず)、他フィールドと同時でも保存値は不変', async () => {
+      const admin = await setupAndLogin(ctx.app);
+      const project = await createProject(ctx.app, admin, 'payment-service');
+      const created = await postTestCase(ctx.app, admin, project.body.id);
+      expect(created.source_ref).toBeNull();
+
+      const historyBefore = await ctx.app.request(
+        `/api/v1/projects/${project.body.id}/testcases/${created.id}/history`,
+        { headers: { Cookie: cookieHeader(admin.jar) } },
+      );
+      const totalBefore = (await historyBefore.json<any>()).total;
+
+      // source_ref のみを変更する PATCH: computeHumanPatch の対象外のため changes が空になり、
+      // ルートの no-op 分岐(data-model.md「同値PATCH(no-op)では遷移しない」相当の扱い)に入る。
+      // 200 は返るが version は bump されず、保存値も変化しない。
+      const res1 = await ctx.app.request(
+        `/api/v1/projects/${project.body.id}/testcases/${created.id}`,
+        jsonReq('PATCH', { source_ref: { file: 'Y.java', line: 42 } }, authHeaders(admin, { 'If-Match': '"1"' })),
+      );
+      expect(res1.status).toBe(200);
+      const body1 = await res1.json<any>();
+      expect(body1.source_ref).toBeNull(); // 書き込まれていない
+      expect(body1.version).toBe(1); // no-op のため不変
+
+      const historyAfter1 = await ctx.app.request(
+        `/api/v1/projects/${project.body.id}/testcases/${created.id}/history`,
+        { headers: { Cookie: cookieHeader(admin.jar) } },
+      );
+      expect((await historyAfter1.json<any>()).total).toBe(totalBefore); // 履歴も増えない
+
+      // source_ref + 実フィールド変更を同時に送っても、version bump は実フィールド由来のみ・
+      // source_ref は依然として書き込まれない(バージョン挙動は他フィールドどおり)。
+      const res2 = await ctx.app.request(
+        `/api/v1/projects/${project.body.id}/testcases/${created.id}`,
+        jsonReq('PATCH', { title: '新タイトル2', source_ref: { file: 'Z.java', line: 7 } }, authHeaders(admin, { 'If-Match': '"1"' })),
+      );
+      expect(res2.status).toBe(200);
+      const body2 = await res2.json<any>();
+      expect(body2.title).toBe('新タイトル2');
+      expect(body2.version).toBe(2); // title の実変更により bump(source_ref 由来ではない)
+      expect(body2.source_ref).toBeNull(); // それでも source_ref は書き込まれない
+    });
+
     it('status: archived→approved は 422 VALIDATION_FAILED(遷移マトリクス違反)', async () => {
       const admin = await setupAndLogin(ctx.app);
       const project = await createProject(ctx.app, admin, 'payment-service');

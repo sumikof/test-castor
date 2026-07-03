@@ -18,7 +18,17 @@ import type { Status } from '../schemas/enums';
 export type AnyQuery = { run(): unknown };
 export interface StorageDriver {
   db: any; // drizzle sqlite database(sync/async 両対応のため any。adapters 内でのみ生成)
-  batch(queries: AnyQuery[]): Promise<void>;
+  /**
+   * 複数の書き込み文を単一トランザクションとして原子的に実行し、各文が実際に影響した行数を
+   * 実行順の配列で返す(better-sqlite3: RunResult.changes / D1: D1Result.meta.changes / libSQL:
+   * ResultSet.rowsAffected。3アダプタとも SQLite の `changes()` 相当のセマンティクス)。
+   * review round 1(CRITICAL OCC concurrency)以前は Promise<void> で戻り値を捨てていたため、
+   * OCC 対象の UPDATE が実際に0行しか更新しなくても呼び出し側が気づけず、対になる history INSERT が
+   * 無条件に走って「偽の成功 + phantom history」を生む欠陥があった(drizzle-storage.ts の
+   * patchTestCase/acceptFingerprint/archiveTestCase 参照)。戻り値を検査することで、事前チェックの
+   * スナップショットではなく「実際に何が書けたか」を根拠に conflict/ok を判定できるようにする。
+   */
+  batch(queries: AnyQuery[]): Promise<number[]>;
   rawExec(sqlText: string): Promise<void>;
 }
 const uuid = () => crypto.randomUUID();
@@ -90,6 +100,21 @@ export function createDrizzleStorage(driver: StorageDriver): Storage {
       .limit(1);
     return row ? row.obs : null;
   };
+
+  // review round 1(CRITICAL OCC concurrency)。TestCaseHistory への「条件付き」INSERT を組み立てる。
+  // 直前に同一 batch(=同一トランザクション・同一コネクション)内で完了した UPDATE の affected 行数を
+  // SQLite組み込み関数 `changes()` で読み、1以上のときのみ実際に1行 INSERT する
+  // (`INSERT INTO ... SELECT <値> WHERE (SELECT changes()) > 0`。FROM を伴わない SELECT は
+  // WHERE が偽なら0行を返す標準 SQL で、3アダプタ(better-sqlite3/D1/libSQL)とも動作する)。
+  // `changes()` は「直前に完了した INSERT/UPDATE/DELETE」を指し、SELECT では更新されないため、
+  // このガード自身が実行されても(0行 INSERT でも)次に連鎖するガード付き INSERT へ同じ0/1の
+  // シグナルを正しく伝播する(historyEntries が複数件でもチェーンとして機能する)。
+  // driver.batch の戻り値(affected行数の検査)と独立した DB 側の二重防御(belt-and-suspenders)であり、
+  // 万一 TS 側の count 検査を書き漏らしても phantom history だけは構造的に防げる。
+  const guardedHistoryInsert = (h: NewHistoryEntry, testCaseId: string, now: number) =>
+    db.insert(testCaseHistory).select(
+      sql`SELECT ${uuid()}, ${testCaseId}, ${h.actor}, ${h.action}, ${JSON.stringify(h.delta)}, ${now} WHERE (SELECT changes()) > 0`,
+    );
 
   const storage = {
     async countOrganizations() {
@@ -352,58 +377,94 @@ export function createDrizzleStorage(driver: StorageDriver): Storage {
     },
 
     // --- test cases 書き込み系(task-14-brief.md)---
+    // review round 1(CRITICAL OCC concurrency)。旧実装は事前チェック(current.version !==
+    // p.expectedVersion)だけで conflict を決めていた。これは「2つのリクエストが両方とも同じ
+    // version(例: 5)を読んでから競走する」真の並行レースを検出できない: 敗者側の事前チェックも
+    // (勝者の書き込みがまだ確定していない時点では)自分の expectedVersion と一致してしまうため、
+    // この早期判定をすり抜けて次段の UPDATE に到達する。DB 側では single-writer により2つの batch が
+    // 直列化され、先着した UPDATE が version を+1し、後着した UPDATE の WHERE version=:expected は
+    // 0行にしか一致しない(エラーにはならない)。旧実装はこの affected 行数を検査せず、対になる
+    // history INSERT を無条件に実行し、`{...current, ...setValues}` で組み立てた「捏造」行を伴う
+    // {kind:'ok'} を返していた ⇒ 敗者クライアントに false 200 + ETag、TestCaseHistory に phantom entry。
+    //
+    // 修正: 事前チェック(getTestCase)の役割を「id が存在するか(404)」だけに縮小し、conflict の判定は
+    // 「UPDATE の WHERE version=:expected が実際に何行へ命中したか」(driver.batch の返す affected 行数)
+    // のみを根拠にする(事前チェックのスナップショットは一切信用しない)。version/ownership も
+    // p.columnValues のアプリ側スナップショット値(computeHumanPatch が current.version+1 等から算出した
+    // もの)ではなく、UPDATE 文内で現在行を基準に SQL 側で導出する(version=version+1 / CASE式)。
+    // history INSERT は guardedHistoryInsert により `changes()>0` でガードし、0行更新(conflict)時に
+    // history だけが増える phantom entry を DB 側でも二重に防ぐ。
     async patchTestCase(scope: OrgScope, pid: string, id: string, p) {
-      // OCC の成否(not_found / conflict)を書き込み前の getTestCase で確定させる。single-writer の
-      // D1/SQLite/libSQL では、この判定と直後の driver.batch の間に他者の書き込みが割り込まないため
-      // (setUserRoleGuarded の設計ノートと同じ前提)、事前チェックは atomic な WHERE version=:expected と等価。
-      // これにより UPDATE と TestCaseHistory INSERT を「単一 batch = 同一トランザクション」にまとめられ、
-      // data-model.md「machine→human は同一文・同一トランザクションで version を+1して遷移」および
-      // TestCaseHistory 追記の原子性(UPDATE 成功時に必ず履歴が残る)を保証できる。
       const current = await getTestCase(scope, pid, id);
       if (!current) return { kind: 'not_found' as const };
-      if (current.version !== p.expectedVersion) return { kind: 'conflict' as const };
 
-      const setValues: Record<string, unknown> = { ...p.columnValues, humanUpdatedAt: p.now };
-      if (p.ownershipTransition) setValues.ownership = 'human';
+      // p.columnValues は domain.computeHumanPatch が事前スナップショットから計算した version/ownership を
+      // 含みうるが、上記のとおりここでは使わない(SQL 側で現在行基準に導出するため除外する)。
+      const { version: _snapshotVersion, ownership: _snapshotOwnership, ...restColumnValues } = p.columnValues;
+      const setValues: Record<string, unknown> = {
+        ...restColumnValues,
+        humanUpdatedAt: p.now,
+        version: sql`${testCases.version} + 1`,
+      };
+      if (p.ownershipTransition) {
+        setValues.ownership = sql`CASE WHEN ${testCases.ownership} = 'machine' THEN 'human' ELSE ${testCases.ownership} END`;
+      }
 
-      // WHERE version=:expected は事前チェックと冗長だが、single-writer 前提を DB 側でも二重に担保する
-      // belt-and-suspenders として残す(万一のずれでは 0 行更新になり、履歴だけが残る事態を防ぐ)。
+      // WHERE version=:expected が OCC の唯一の判定点(belt-and-suspenders ではなく本判定)。
       const statements: AnyQuery[] = [
         db.update(testCases).set(setValues as any)
           .where(and(eq(testCases.id, id), eq(testCases.projectId, pid), eq(testCases.version, p.expectedVersion))),
-        ...p.historyEntries.map((h) => db.insert(testCaseHistory).values({
-          id: uuid(), testCaseId: id, actor: h.actor, action: h.action, delta: JSON.stringify(h.delta), createdAt: p.now,
-        })),
+        ...p.historyEntries.map((h) => guardedHistoryInsert(h, id, p.now)),
       ];
-      await driver.batch(statements);
+      const counts = await driver.batch(statements);
+      const updateCount = counts[0] ?? 0;
+      if (updateCount === 0) return { kind: 'conflict' as const };
 
-      // 更新後の行は current + setValues から決定的に導出する(driver.batch は結果を返さないため再 SELECT を
-      // 省く)。columnValues のキーは TestCaseRow のカラム名と 1:1(version/ownership/parameters(JSON文字列)等)。
-      const row = { ...current, ...setValues } as TestCaseRow;
+      // updateCount>=1 は UPDATE が実際に着地したことの証明(=行は存在する)。SQL 側で導出した
+      // version/ownership を含め、実際に書き込まれた値を正として再取得する(アプリ側再構築に頼らない)。
+      const row = await getTestCase(scope, pid, id);
+      if (!row) throw new Error('patchTestCase: row unexpectedly missing after a successful update');
       return { kind: 'ok' as const, row };
     },
 
+    // review round 1(CRITICAL OCC concurrency)。旧実装は WHERE に version 条件を含めない(D-02 どおり
+    // OCC 不要)一方、SET する version/ownership を事前チェックのスナップショット(current.version+1 /
+    // current.ownership)からアプリ側で計算していた。これは「事前チェックと UPDATE の間に別の書き込み
+    // (例: 並行する patchTestCase)が着地する」レースで、その並行更新の version/ownership を古い値で
+    // 上書き(回帰)しうる欠陥だった。修正: version/ownership は UPDATE 文内で現在行を基準に SQL 側で
+    // 導出する(version=version+1 / CASE式)ため、事前チェックと UPDATE の間に何が起きていても
+    // 「現在の値+1」「現在の ownership から派生した値」に必ずなる。
+    // 加えて WHERE に `status != 'archived'` を埋め込み、2つの同時 archive リクエストが両方とも
+    // 「まだ archived ではない」を読んでから競走しても、先着した側だけが実際に status を変更し
+    // (後着の UPDATE は0行に短絡)、guardedHistoryInsert の changes()>0 ガードにより後着側の
+    // history だけが phantom で増えることも防ぐ(冪等)。D-02: OCC(version 条件)は使わず、
+    // 常に成功として現在値を返す(never 409)。
     async archiveTestCase(scope: OrgScope, pid: string, id: string, actor: string, now: number) {
       const current = await getTestCase(scope, pid, id);
       if (!current) return null;
-      if (current.status === 'archived') return current; // 冪等: 既に archived なら現状をそのまま返す
+      if (current.status === 'archived') return current; // 冪等: 既に archived なら現状をそのまま返す(書き込みを試みない)
 
-      const setValues: Record<string, unknown> = { status: 'archived', version: current.version + 1, humanUpdatedAt: now };
-      // 複合不変条件 status IN ('approved','archived') ⇒ ownership='human' を満たすため、
-      // machine 所有の draft を archive する場合も human へ遷移させる(data-model.md)。
-      if (current.ownership === 'machine') setValues.ownership = 'human';
-
-      const historyRow = {
-        id: uuid(), testCaseId: id, actor, action: 'status_changed' as const,
-        delta: JSON.stringify({ status: { before: current.status, after: 'archived' } }), createdAt: now,
+      const historyRow: NewHistoryEntry = {
+        actor, action: 'status_changed',
+        delta: { status: { before: current.status, after: 'archived' } },
       };
-      // OCC 不要(D-02)なので WHERE に version 条件を含めない。UPDATE と history INSERT を単一 batch に
-      // まとめて原子性を保証する(status 変更と履歴追記が同一トランザクションで確定する)。
       await driver.batch([
-        db.update(testCases).set(setValues as any).where(and(eq(testCases.id, id), eq(testCases.projectId, pid))),
-        db.insert(testCaseHistory).values(historyRow),
+        db.update(testCases).set({
+          status: 'archived',
+          version: sql`${testCases.version} + 1`,
+          // 複合不変条件 status IN ('approved','archived') ⇒ ownership='human' を満たすため、
+          // machine 所有の draft を archive する場合も human へ遷移させる(data-model.md)。
+          ownership: sql`CASE WHEN ${testCases.ownership} = 'machine' THEN 'human' ELSE ${testCases.ownership} END`,
+          humanUpdatedAt: now,
+        }).where(and(eq(testCases.id, id), eq(testCases.projectId, pid), ne(testCases.status, 'archived'))),
+        guardedHistoryInsert(historyRow, id, now),
       ]);
-      const row = { ...current, ...setValues } as TestCaseRow;
+
+      // affected 行数は分岐に使わない(常に成功として扱う。D-02: never 409)。0行(競合する同時 archive に
+      // 敗れた)でも「archived に到達済み」という望んだ終状態は変わらないため、現在値を再取得して返す。
+      // 行は事前チェックで存在確認済みであり、テストケースに物理 DELETE は存在しないため null にはならない。
+      const row = await getTestCase(scope, pid, id);
+      if (!row) throw new Error('archiveTestCase: row unexpectedly missing after guarded update');
       return row;
     },
 
@@ -450,33 +511,41 @@ export function createDrizzleStorage(driver: StorageDriver): Storage {
       return { updated, skipped, errors };
     },
 
+    // review round 1(CRITICAL OCC concurrency)。patchTestCase と同じ理由・同じ修正パターン
+    // (コメント詳細は patchTestCase 参照): conflict の判定は事前チェックのスナップショット比較ではなく
+    // 「UPDATE の WHERE version=:expected が実際に何行へ命中したか」のみを根拠にする。
     async acceptFingerprint(scope: OrgScope, pid: string, id: string, expectedVersion: number, actor: string, now: number) {
       const current = await getTestCase(scope, pid, id);
       if (!current) return { kind: 'not_found' as const };
-      // drift 判定は OCC より先に行う(no_drift は前提条件違反であり version の一致・不一致を問わない)。
+      // drift 判定は OCC より先に行う(no_drift は前提条件違反であり version の一致・不一致を問わない。
+      // ここは事前チェックのままでよい: version とは独立した業務ルール上の前提条件であり、
+      // OCC のすり抜けとは無関係)。
       if (!current.drift) return { kind: 'no_drift' as const };
-
-      // OCC の成否は書き込み前に確定させる(patchTestCase と同じ single-writer 前提。not_found は上で、
-      // no_drift はその次で判定済みなので、ここに来た時点で残る失敗は version 不一致のみ)。
-      if (current.version !== expectedVersion) return { kind: 'conflict' as const };
 
       const latest = await getLatestCommittedObservation(scope, pid, id);
       const newFingerprint = latest ? latest.fingerprint : current.fingerprint;
 
-      const setValues = { fingerprint: newFingerprint, drift: 0, version: expectedVersion + 1, humanUpdatedAt: now };
-      const historyRow = {
-        id: uuid(), testCaseId: id, actor, action: 'status_changed' as const,
-        delta: JSON.stringify({ drift: { before: true, after: false }, fingerprint: { before: current.fingerprint, after: newFingerprint } }),
-        createdAt: now,
+      // version は expectedVersion+1(アプリ側スナップショット)ではなく SQL 側で現在行を基準に導出する
+      // (version=version+1)。WHERE version=:expected が OCC の唯一の判定点(本判定)。
+      const historyRow: NewHistoryEntry = {
+        actor, action: 'status_changed',
+        delta: { drift: { before: true, after: false }, fingerprint: { before: current.fingerprint, after: newFingerprint } },
       };
-      // UPDATE と history INSERT を単一 batch にまとめて原子性を保証する(drift 解消と履歴追記が
-      // 同一トランザクションで確定する)。WHERE version=:expected は事前チェックとの belt-and-suspenders。
-      await driver.batch([
-        db.update(testCases).set(setValues)
-          .where(and(eq(testCases.id, id), eq(testCases.projectId, pid), eq(testCases.version, expectedVersion))),
-        db.insert(testCaseHistory).values(historyRow),
-      ]);
-      const row = { ...current, ...setValues } as TestCaseRow;
+      const statements: AnyQuery[] = [
+        db.update(testCases).set({
+          fingerprint: newFingerprint,
+          drift: 0,
+          version: sql`${testCases.version} + 1`,
+          humanUpdatedAt: now,
+        }).where(and(eq(testCases.id, id), eq(testCases.projectId, pid), eq(testCases.version, expectedVersion))),
+        guardedHistoryInsert(historyRow, id, now),
+      ];
+      const counts = await driver.batch(statements);
+      const updateCount = counts[0] ?? 0;
+      if (updateCount === 0) return { kind: 'conflict' as const };
+
+      const row = await getTestCase(scope, pid, id);
+      if (!row) throw new Error('acceptFingerprint: row unexpectedly missing after a successful update');
       return { kind: 'ok' as const, row };
     },
 
