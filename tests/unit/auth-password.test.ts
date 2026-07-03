@@ -2,7 +2,7 @@
 // パスワードハッシュ(PHC pbkdf2-sha256)の往復・誤りパスワード否認・needsRehash・
 // 破損/未知形式の非例外契約を検証する(auth-security.md「パスワード保存」、
 // data-model.md「パスワードハッシュ仕様」)。
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { createWebcryptoAuth } from '../../src/auth/webcrypto-auth';
 
 const TEST_ITERATIONS = 1000;
@@ -76,5 +76,35 @@ describe('auth: password (PHC pbkdf2-sha256)', () => {
   ])('verifyPassword: 破損/未知形式(%s)は例外を投げず { ok:false, needsRehash:false }', async (_label, badPhc) => {
     const auth = makeAuth();
     await expect(auth.verifyPassword('anything', badPhc)).resolves.toEqual({ ok: false, needsRehash: false });
+  });
+
+  // タイミングサイドチャネル(ユーザー列挙)回帰ガード: phc=null(未知 email)・未知形式のどちらでも
+  // 「検証すら行わず即座に失敗」に戻っていないことを構造的に固定する。実時間計測はテストでは非決定的
+  // なので、"PBKDF2 導出(deriveBits)が実際に1回走ったか" をスパイで直接検証する
+  // (src/auth/password.ts 冒頭コメント「タイミングサイドチャネル対策」参照)。
+  it('verifyPassword: phc=null(未知 email 相当)・未知形式のどちらでも deriveBits が1回呼ばれる(ダミー導出でコストを揃える)', async () => {
+    const auth = makeAuth();
+    const deriveBitsSpy = vi.spyOn(crypto.subtle, 'deriveBits');
+
+    try {
+      deriveBitsSpy.mockClear();
+      const nullResult = await auth.verifyPassword('pw', null);
+      expect(nullResult).toEqual({ ok: false, needsRehash: false });
+      expect(deriveBitsSpy).toHaveBeenCalledTimes(1); // 早期return禁止: null でも必ず1回導出する
+
+      deriveBitsSpy.mockClear();
+      const malformedResult = await auth.verifyPassword('pw', 'not-a-phc-string');
+      expect(malformedResult).toEqual({ ok: false, needsRehash: false });
+      expect(deriveBitsSpy).toHaveBeenCalledTimes(1); // 破損/未知形式でも同様に1回導出する
+
+      // 比較対象: 正規の PHC に対する「誤りパスワード」経路も同じく1回だけ導出する(=コストが揃っている)。
+      const phc = await auth.hashPassword('correct horse');
+      deriveBitsSpy.mockClear();
+      const wrongPasswordResult = await auth.verifyPassword('wrong', phc);
+      expect(wrongPasswordResult.ok).toBe(false);
+      expect(deriveBitsSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      deriveBitsSpy.mockRestore();
+    }
   });
 });

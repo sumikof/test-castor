@@ -4,11 +4,21 @@
 // salt: 16バイト CSPRNG(per-user)。hash: PBKDF2-SHA256 導出鍵32バイト(SHA-256出力長)。
 // salt/hash は標準base64アルファベット(+/)・パディングなし(PHC仕様の慣習)。base64url ではない。
 // 比較は定数時間(XOR-accumulate)。verifyPassword は未知形式・破損データで例外を投げない。
+//
+// タイミングサイドチャネル対策(auth-security.md「タイミング攻撃対策」): phc が null(該当ユーザーなし)
+// または未知形式・破損データの場合でも、必ず現行イテレーション数で1回分のダミー PBKDF2 導出を行ってから
+// 失敗を返す。これを怠ると「未知 email → 導出コスト無しで即401」「既知 email+誤りパスワード → フル
+// PBKDF2 コストで401」という所要時間差が生まれ、レート制限をすり抜けながら email の存在有無を1件ずつ
+// 判別できてしまう(ユーザー列挙)。コストを揃える箇所は呼び出し側(HTTPハンドラ)の分岐ではなく、
+// イテレーション数を知っているこの層でなければならない。
 
 const ALGORITHM_ID = 'pbkdf2-sha256';
 const PHC_PREFIX = `$${ALGORITHM_ID}$`;
 const SALT_BYTE_LEN = 16;
 const HASH_BYTE_LEN = 32; // SHA-256 出力長
+/** null/未知形式/破損 PHC のダミー導出専用の固定ソルト(16バイト)。値そのものに秘匿性は不要
+ *  (どうせ結果を捨てる)— 目的はコストを揃えることだけであり、毎回同じ固定値で構わない。 */
+const DUMMY_SALT = new Uint8Array(SALT_BYTE_LEN);
 
 function bytesToBase64(bytes: Uint8Array): string {
   const binary = Array.from(bytes, (b) => String.fromCharCode(b)).join('');
@@ -87,17 +97,25 @@ export async function hashPassword(plain: string, iterations: number): Promise<s
 }
 
 /**
- * plain と phc を照合する。未知フォーマット・破損データは例外を投げず { ok: false, needsRehash: false }。
+ * plain と phc を照合する。null・未知フォーマット・破損データは例外を投げず { ok: false, needsRehash: false }。
  * needsRehash は ok=true の場合のみ意味を持ち、phc の iterations が現行設定(configuredIterations)未満なら true
  * (透過再ハッシュの実行そのものは呼び出し側 = Task 8 のログイン処理が行う)。
+ *
+ * phc=null(呼び出し側が「該当ユーザーなし」を表すために渡す)・未知形式・破損データのいずれでも、
+ * 現行イテレーション数で1回分のダミー PBKDF2 導出を必ず行ってから失敗を返す(ファイル冒頭コメント
+ * 「タイミングサイドチャネル対策」参照)。これにより誤りパスワード経路(下の valid-PHC 分岐)と
+ * 所要コストがほぼ揃い、応答時間から email の存在有無を推測できなくなる。
  */
 export async function verifyPassword(
   plain: string,
-  phc: string,
+  phc: string | null,
   configuredIterations: number,
 ): Promise<{ ok: boolean; needsRehash: boolean }> {
-  const parsed = parsePhc(phc);
-  if (!parsed) return { ok: false, needsRehash: false };
+  const parsed = phc === null ? null : parsePhc(phc);
+  if (!parsed) {
+    await pbkdf2Derive(plain, DUMMY_SALT, configuredIterations); // 結果は使わない。コストを揃えるためだけの導出。
+    return { ok: false, needsRehash: false };
+  }
   const computed = await pbkdf2Derive(plain, parsed.salt, parsed.iterations);
   const ok = constantTimeEqualBytes(computed, parsed.hash);
   return { ok, needsRehash: ok && parsed.iterations < configuredIterations };

@@ -32,9 +32,11 @@ export const authRoutes = new Hono<AppEnv>()
     }
 
     const user = await deps.storage.findUserForLogin(email);
-    const result = user?.passwordHash
-      ? await deps.auth.verifyPassword(password, user.passwordHash)
-      : { ok: false, needsRehash: false };
+    // 未知 email(user=null)・パスワード未設定(passwordHash=null)でも、既知 email+誤りパスワードと
+    // 同じコストの PBKDF2 を必ず1回実行させる(verifyPassword に null をそのまま渡す)。ここで
+    // 「該当なしなら検証すらしない」早期分岐を作ると、応答時間差から email の存在有無が漏れる
+    // (タイミングサイドチャネルによるユーザー列挙。auth-security.md「タイミング攻撃対策」)。
+    const result = await deps.auth.verifyPassword(password, user?.passwordHash ?? null);
 
     if (!user || !result.ok) {
       // 失敗した試行のみ consume する(正しいパスワードの試行はカウントしない非対称レート制限)。

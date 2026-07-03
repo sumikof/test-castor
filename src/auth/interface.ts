@@ -9,8 +9,13 @@ export interface Auth {
    * plain と phc を照合する。未知フォーマット・破損データでも例外を投げない。
    * needsRehash は ok=true のときのみ意味を持ち、phc の iterations が現行設定未満なら true
    * (透過再ハッシュの実行そのものは呼び出し側 = ログイン処理の責務)。
+   *
+   * phc は null を受け付ける(該当ユーザーが存在しない/パスワード未設定のケースを呼び出し側が
+   * そのまま渡せるようにするため)。null・未知フォーマット・破損データのいずれでも必ず現行イテレーション数で
+   * 1回分の PBKDF2 導出を行ってから { ok: false, needsRehash: false } を返す実装であること
+   * (タイミングサイドチャネルによるユーザー列挙対策。auth-security.md「タイミング攻撃対策」)。
    */
-  verifyPassword(plain: string, phc: string): Promise<{ ok: boolean; needsRehash: boolean }>;
+  verifyPassword(plain: string, phc: string | null): Promise<{ ok: boolean; needsRehash: boolean }>;
 
   /** 32バイト CSPRNG(base64url・パディングなし)。Session 行の PK として使う。 */
   newSessionId(): string;
