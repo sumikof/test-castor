@@ -1,8 +1,9 @@
 // src/storage/interface.ts
 import type {
   OrganizationRow, UserRow, SessionRow, ProjectRow, ApiTokenRow, TestCaseRow, TestCaseHistoryRow,
+  TestCaseIdentityRow, TestCaseObservationRow,
 } from './schema';
-import type { Role, Status, Category, Ownership, HistoryAction } from '../schemas/enums';
+import type { Role, Status, Category, Ownership, HistoryAction, BulkAction } from '../schemas/enums';
 import type { ParamRow } from '../domain/testcase-rules';
 
 export interface OrgScope { organizationId: string }
@@ -58,6 +59,42 @@ export interface NewHistoryEntry {
   action: HistoryAction;
   delta: Record<string, unknown>;
 }
+
+// --- test cases 書き込み系(task-14-brief.md「Produces(Storage 追加分)」)---
+
+/**
+ * patchTestCase の結果種別。changed rows が 0 の場合、呼び出し側は id の存在確認により
+ * conflict(存在するが version 不一致)/ not_found(そもそも存在しない)を判別する。
+ */
+export type PatchResult = { kind: 'ok'; row: TestCaseRow } | { kind: 'conflict' } | { kind: 'not_found' };
+
+/** patchTestCase の入力(domain.computeHumanPatch の出力 + OCC/actor/時刻)。 */
+export interface PatchTestCaseParams {
+  /** If-Match から parse した version(存在しない場合は呼び出し側が 428 を返し、ここへは来ない)。 */
+  expectedVersion: number;
+  /** domain.computeHumanPatch の columnValues(実変更があった人間所有列のみ。version/ownership を含む)。 */
+  columnValues: Record<string, unknown>;
+  /** true の場合、SET 句に ownership='human' を含める(machine→human の不可逆遷移。同一 UPDATE 文)。 */
+  ownershipTransition: boolean;
+  /** 同一 UPDATE の成功時にのみ追記する TestCaseHistory 行(0件・1件・2件のいずれもありうる)。 */
+  historyEntries: NewHistoryEntry[];
+  now: number;
+}
+
+export type AcceptFingerprintResult =
+  | { kind: 'ok'; row: TestCaseRow }
+  | { kind: 'conflict' }
+  | { kind: 'no_drift' }
+  | { kind: 'not_found' };
+
+export interface BulkActionResult {
+  updated: number;
+  skipped: number;
+  errors: Array<{ id: string; code: string; message: string }>;
+}
+
+/** GET /testcases/:id/observations のクエリフィルタ(origin 任意)。 */
+export interface ObservationFilters { origin?: string }
 
 export interface Storage {
   // --- setup / organization ---
@@ -134,4 +171,58 @@ export interface Storage {
   listHistory(
     scope: OrgScope, pid: string, id: string, page: Page,
   ): Promise<Paged<TestCaseHistoryRow & { actorDisplay: string }>>;
+
+  // --- test cases 書き込み系(task-14-brief.md)---
+  /**
+   * OCC 付き単一 UPDATE(apis/testcases.md「PATCH /testcases/:id」・data-model.md「OCC」)。
+   * SET は columnValues(人間所有列の実変更分)+ human_updated_at=now + ( ownershipTransition なら
+   * ownership='human' )を1つの UPDATE 文にまとめ、WHERE id=:id AND project_id=:pid AND
+   * version=:expectedVersion で原子的に排他する。No-op PATCH(changes 空)はこのメソッドを呼ばず
+   * 呼び出し側(ルートハンドラ)が現在値を 200 で返す契約(このメソッドは常に「書き込みを試みる」)。
+   * 変更行数が 0 の場合、id の存在有無で conflict(存在するが version 不一致)/ not_found を判別する。
+   * historyEntries は UPDATE 成功時にのみ追記する(失敗時は 0 行のまま。history の追記専用性を保つ)。
+   */
+  patchTestCase(scope: OrgScope, pid: string, id: string, p: PatchTestCaseParams): Promise<PatchResult>;
+  /**
+   * アーカイブ(apis/testcases.md「DELETE /testcases/:id」、スペック D-02: PATCH のセマンティック
+   * エイリアス)。OCC 不要・冪等(既に archived なら現状をそのまま返す。UPDATE/history 共に発生しない)。
+   * 未 archived の場合のみ status='archived'(+ machine 所有なら ownership='human'。複合不変条件
+   * `status IN ('approved','archived') ⇒ ownership='human'` を満たすため)+ history(status_changed)を
+   * 1つの driver.batch で書く。id が存在しなければ null。
+   */
+  archiveTestCase(scope: OrgScope, pid: string, id: string, actor: string, now: number): Promise<TestCaseRow | null>;
+  /**
+   * 一括操作(apis/testcases.md「POST /testcases/bulk」)。SELECT で対象行をまとめて取得し、
+   * 各行に domain.applyBulkAction を適用した結果を集計する。実際に UPDATE が必要な行のみ
+   * (UPDATE, history INSERT)のペアを1つの driver.batch にまとめて実行する(OCC は使用しない)。
+   * ids に存在しない id が含まれる場合は errors に `NOT_FOUND` として計上する。
+   */
+  bulkAction(
+    scope: OrgScope, pid: string, ids: string[], action: BulkAction, actor: string, now: number,
+  ): Promise<BulkActionResult>;
+  /**
+   * drift 解消(apis/testcases.md「POST /testcases/:id/accept-fingerprint」)。OCC 付き。
+   * 現在行が存在しなければ not_found、drift=false なら no_drift(OCC より前に判定する)。
+   * drift=true の場合、getLatestCommittedObservation(mirror_origin 由来)の fingerprint を採用し、
+   * drift=0・version=expectedVersion+1・human_updated_at=now を1つの UPDATE 文(WHERE version=
+   * expectedVersion)で書く。変更行数が 0 なら conflict(存在は直前に確認済みのため not_found にはならない)。
+   * 成功時のみ TestCaseHistory に status_changed を追記する。
+   */
+  acceptFingerprint(
+    scope: OrgScope, pid: string, id: string, expectedVersion: number, actor: string, now: number,
+  ): Promise<AcceptFingerprintResult>;
+  /** per-origin の同定情報(apis/testcases.md「GET /testcases/:id/identities」)。ページングなし。 */
+  listIdentities(scope: OrgScope, pid: string, id: string): Promise<TestCaseIdentityRow[]>;
+  /**
+   * committed セッション由来の観測のみ(JOIN sync_sessions.status='committed'。data-model.md「意味論的
+   * 隔離」)を時系列で返す(apis/testcases.md「GET /testcases/:id/observations」)。origin 任意フィルタ。
+   */
+  listObservations(
+    scope: OrgScope, pid: string, id: string, p: ObservationFilters & Page,
+  ): Promise<Paged<TestCaseObservationRow>>;
+  /**
+   * 当該テストケースの mirror_origin 由来・committed セッションの最新観測(data-model.md「drift」の
+   * 基準列)。diff・accept-fingerprint の両方で使う。mirror_origin が null(手動作成)なら null。
+   */
+  getLatestCommittedObservation(scope: OrgScope, pid: string, id: string): Promise<TestCaseObservationRow | null>;
 }

@@ -1,14 +1,18 @@
 // src/storage/drizzle-storage.ts
-import { and, eq, ne, isNull, count, desc, sql } from 'drizzle-orm';
+import { and, eq, ne, isNull, count, desc, sql, inArray } from 'drizzle-orm';
 import {
   organizations, users, sessions, projects, apiTokens, testCases, testCaseHistory,
-  type SessionRow,
+  testCaseIdentities, testCaseObservations, syncSessions,
+  type SessionRow, type TestCaseRow,
 } from './schema';
 import type {
   Storage, OrgScope, SetupParams, CreateUserParams,
   TestCaseFilters, Page, NewTestCaseColumns, NewHistoryEntry,
 } from './interface';
 import { encodeCursor, decodeCursor } from '../domain/cursor';
+import { applyBulkAction } from '../domain/testcase-rules';
+import { buildHistoryEntries } from '../domain/history-delta';
+import type { Status } from '../schemas/enums';
 
 // 3アダプタの差(batch/transaction/raw)を吸収する薄いドライバ
 export type AnyQuery = { run(): unknown };
@@ -57,6 +61,34 @@ export function createDrizzleStorage(driver: StorageDriver): Storage {
     const [p] = await db.select().from(projects)
       .where(and(eq(projects.id, pid), eq(projects.organizationId, scope.organizationId)));
     return p ?? null;
+  };
+
+  // task-14-brief.md「patchTestCase/archiveTestCase/acceptFingerprint」から再利用するため、
+  // getUser/getProject と同じ流儀で先出しする(以後の書き込み系メソッドが自己完結できるように)。
+  const getTestCase: Storage['getTestCase'] = async (scope, pid, id) => {
+    const [row] = await db.select().from(testCases)
+      .where(and(eq(testCases.id, id), eq(testCases.projectId, pid)));
+    return row ?? null;
+  };
+
+  // data-model.md「drift」の基準列: mirror_origin 由来・committed セッションの最新観測。
+  // mirror_origin が null(手動作成)の行は origin = NULL の等価比較が常に unknown になるため
+  // 自然に「該当なし」になる(追加の null ガードは不要)。
+  const getLatestCommittedObservation: Storage['getLatestCommittedObservation'] = async (scope, pid, id) => {
+    const [row] = await db
+      .select({ obs: testCaseObservations })
+      .from(testCaseObservations)
+      .innerJoin(testCases, eq(testCases.id, testCaseObservations.testCaseId))
+      .innerJoin(syncSessions, eq(syncSessions.token, testCaseObservations.syncToken))
+      .where(and(
+        eq(testCaseObservations.testCaseId, id),
+        eq(testCaseObservations.projectId, pid),
+        eq(syncSessions.status, 'committed'),
+        eq(testCaseObservations.origin, testCases.mirrorOrigin),
+      ))
+      .orderBy(desc(testCaseObservations.createdAt), desc(testCaseObservations.id))
+      .limit(1);
+    return row ? row.obs : null;
   };
 
   const storage = {
@@ -250,11 +282,7 @@ export function createDrizzleStorage(driver: StorageDriver): Storage {
       return tcRow as any;
     },
 
-    async getTestCase(scope: OrgScope, pid: string, id: string) {
-      const [row] = await db.select().from(testCases)
-        .where(and(eq(testCases.id, id), eq(testCases.projectId, pid)));
-      return row ?? null;
-    },
+    getTestCase,
 
     async listTestCases(scope: OrgScope, pid: string, f: TestCaseFilters, page: Page) {
       const conditions = [eq(testCases.projectId, pid)];
@@ -322,6 +350,177 @@ export function createDrizzleStorage(driver: StorageDriver): Storage {
 
       return { items, total: Number(totalRow?.n ?? 0), nextCursor, hasMore };
     },
+
+    // --- test cases 書き込み系(task-14-brief.md)---
+    async patchTestCase(scope: OrgScope, pid: string, id: string, p) {
+      // OCC の成否(not_found / conflict)を書き込み前の getTestCase で確定させる。single-writer の
+      // D1/SQLite/libSQL では、この判定と直後の driver.batch の間に他者の書き込みが割り込まないため
+      // (setUserRoleGuarded の設計ノートと同じ前提)、事前チェックは atomic な WHERE version=:expected と等価。
+      // これにより UPDATE と TestCaseHistory INSERT を「単一 batch = 同一トランザクション」にまとめられ、
+      // data-model.md「machine→human は同一文・同一トランザクションで version を+1して遷移」および
+      // TestCaseHistory 追記の原子性(UPDATE 成功時に必ず履歴が残る)を保証できる。
+      const current = await getTestCase(scope, pid, id);
+      if (!current) return { kind: 'not_found' as const };
+      if (current.version !== p.expectedVersion) return { kind: 'conflict' as const };
+
+      const setValues: Record<string, unknown> = { ...p.columnValues, humanUpdatedAt: p.now };
+      if (p.ownershipTransition) setValues.ownership = 'human';
+
+      // WHERE version=:expected は事前チェックと冗長だが、single-writer 前提を DB 側でも二重に担保する
+      // belt-and-suspenders として残す(万一のずれでは 0 行更新になり、履歴だけが残る事態を防ぐ)。
+      const statements: AnyQuery[] = [
+        db.update(testCases).set(setValues as any)
+          .where(and(eq(testCases.id, id), eq(testCases.projectId, pid), eq(testCases.version, p.expectedVersion))),
+        ...p.historyEntries.map((h) => db.insert(testCaseHistory).values({
+          id: uuid(), testCaseId: id, actor: h.actor, action: h.action, delta: JSON.stringify(h.delta), createdAt: p.now,
+        })),
+      ];
+      await driver.batch(statements);
+
+      // 更新後の行は current + setValues から決定的に導出する(driver.batch は結果を返さないため再 SELECT を
+      // 省く)。columnValues のキーは TestCaseRow のカラム名と 1:1(version/ownership/parameters(JSON文字列)等)。
+      const row = { ...current, ...setValues } as TestCaseRow;
+      return { kind: 'ok' as const, row };
+    },
+
+    async archiveTestCase(scope: OrgScope, pid: string, id: string, actor: string, now: number) {
+      const current = await getTestCase(scope, pid, id);
+      if (!current) return null;
+      if (current.status === 'archived') return current; // 冪等: 既に archived なら現状をそのまま返す
+
+      const setValues: Record<string, unknown> = { status: 'archived', version: current.version + 1, humanUpdatedAt: now };
+      // 複合不変条件 status IN ('approved','archived') ⇒ ownership='human' を満たすため、
+      // machine 所有の draft を archive する場合も human へ遷移させる(data-model.md)。
+      if (current.ownership === 'machine') setValues.ownership = 'human';
+
+      const historyRow = {
+        id: uuid(), testCaseId: id, actor, action: 'status_changed' as const,
+        delta: JSON.stringify({ status: { before: current.status, after: 'archived' } }), createdAt: now,
+      };
+      // OCC 不要(D-02)なので WHERE に version 条件を含めない。UPDATE と history INSERT を単一 batch に
+      // まとめて原子性を保証する(status 変更と履歴追記が同一トランザクションで確定する)。
+      await driver.batch([
+        db.update(testCases).set(setValues as any).where(and(eq(testCases.id, id), eq(testCases.projectId, pid))),
+        db.insert(testCaseHistory).values(historyRow),
+      ]);
+      const row = { ...current, ...setValues } as TestCaseRow;
+      return row;
+    },
+
+    async bulkAction(scope: OrgScope, pid: string, ids: string[], action, actor: string, now: number) {
+      // OCC は使用しない(apis/testcases.md「一括操作の利便性を優先」)。SELECT → domain 判定 → batch。
+      // ids の重複は1回分として扱う(同一行に対する UPDATE/history の二重計上・二重付与を防ぐ)。
+      const uniqueIds = [...new Set(ids)];
+      const rows: TestCaseRow[] = uniqueIds.length > 0
+        ? await db.select().from(testCases).where(and(eq(testCases.projectId, pid), inArray(testCases.id, uniqueIds)))
+        : [];
+      const rowsById = new Map(rows.map((r) => [r.id, r]));
+
+      let updated = 0;
+      let skipped = 0;
+      const errors: Array<{ id: string; code: string; message: string }> = [];
+      const statements: any[] = [];
+
+      for (const id of uniqueIds) {
+        const row = rowsById.get(id);
+        if (!row) {
+          errors.push({ id, code: 'NOT_FOUND', message: 'test case not found' });
+          continue;
+        }
+        const decision = applyBulkAction(row, action);
+        if (decision.kind === 'skip') { skipped++; continue; }
+        if (decision.kind === 'error') { errors.push({ id, code: decision.code, message: decision.message }); continue; }
+
+        const setValues: Record<string, unknown> = { status: decision.newStatus, version: row.version + 1, humanUpdatedAt: now };
+        if (decision.ownershipTransition) setValues.ownership = 'human';
+        statements.push(db.update(testCases).set(setValues as any).where(and(eq(testCases.id, id), eq(testCases.projectId, pid))));
+
+        const entries = buildHistoryEntries({
+          changes: {}, statusChange: { from: row.status as Status, to: decision.newStatus }, actor, now,
+        });
+        for (const e of entries) {
+          statements.push(db.insert(testCaseHistory).values({
+            id: uuid(), testCaseId: id, actor, action: e.action, delta: JSON.stringify(e.delta), createdAt: now,
+          }));
+        }
+        updated++;
+      }
+
+      if (statements.length > 0) await driver.batch(statements);
+      return { updated, skipped, errors };
+    },
+
+    async acceptFingerprint(scope: OrgScope, pid: string, id: string, expectedVersion: number, actor: string, now: number) {
+      const current = await getTestCase(scope, pid, id);
+      if (!current) return { kind: 'not_found' as const };
+      // drift 判定は OCC より先に行う(no_drift は前提条件違反であり version の一致・不一致を問わない)。
+      if (!current.drift) return { kind: 'no_drift' as const };
+
+      // OCC の成否は書き込み前に確定させる(patchTestCase と同じ single-writer 前提。not_found は上で、
+      // no_drift はその次で判定済みなので、ここに来た時点で残る失敗は version 不一致のみ)。
+      if (current.version !== expectedVersion) return { kind: 'conflict' as const };
+
+      const latest = await getLatestCommittedObservation(scope, pid, id);
+      const newFingerprint = latest ? latest.fingerprint : current.fingerprint;
+
+      const setValues = { fingerprint: newFingerprint, drift: 0, version: expectedVersion + 1, humanUpdatedAt: now };
+      const historyRow = {
+        id: uuid(), testCaseId: id, actor, action: 'status_changed' as const,
+        delta: JSON.stringify({ drift: { before: true, after: false }, fingerprint: { before: current.fingerprint, after: newFingerprint } }),
+        createdAt: now,
+      };
+      // UPDATE と history INSERT を単一 batch にまとめて原子性を保証する(drift 解消と履歴追記が
+      // 同一トランザクションで確定する)。WHERE version=:expected は事前チェックとの belt-and-suspenders。
+      await driver.batch([
+        db.update(testCases).set(setValues)
+          .where(and(eq(testCases.id, id), eq(testCases.projectId, pid), eq(testCases.version, expectedVersion))),
+        db.insert(testCaseHistory).values(historyRow),
+      ]);
+      const row = { ...current, ...setValues } as TestCaseRow;
+      return { kind: 'ok' as const, row };
+    },
+
+    async listIdentities(scope: OrgScope, pid: string, id: string) {
+      return db.select().from(testCaseIdentities)
+        .where(and(eq(testCaseIdentities.testCaseId, id), eq(testCaseIdentities.projectId, pid)))
+        .orderBy(testCaseIdentities.createdAt, testCaseIdentities.id);
+    },
+
+    async listObservations(scope: OrgScope, pid: string, id: string, p) {
+      // committed セッション由来のみ(data-model.md「意味論的隔離」)。origin は任意フィルタ。
+      const conditions = [
+        eq(testCaseObservations.testCaseId, id),
+        eq(testCaseObservations.projectId, pid),
+        eq(syncSessions.status, 'committed'),
+      ];
+      if (p.origin) conditions.push(eq(testCaseObservations.origin, p.origin));
+      const whereBase = and(...conditions);
+
+      const [totalRow] = await db.select({ n: count() })
+        .from(testCaseObservations)
+        .innerJoin(syncSessions, eq(syncSessions.token, testCaseObservations.syncToken))
+        .where(whereBase);
+
+      const cursorCond = cursorPredicate(p.cursor, testCaseObservations.createdAt, testCaseObservations.id);
+      const whereFull = cursorCond ? and(whereBase, cursorCond) : whereBase;
+
+      const rows = await db.select({ obs: testCaseObservations })
+        .from(testCaseObservations)
+        .innerJoin(syncSessions, eq(syncSessions.token, testCaseObservations.syncToken))
+        .where(whereFull)
+        .orderBy(desc(testCaseObservations.createdAt), desc(testCaseObservations.id))
+        .limit(p.limit + 1);
+
+      const allItems = rows.map((r: any) => r.obs);
+      const hasMore = allItems.length > p.limit;
+      const items = hasMore ? allItems.slice(0, p.limit) : allItems;
+      const last = items[items.length - 1];
+      const nextCursor = hasMore && last ? encodeCursor({ createdAt: last.createdAt, id: last.id }) : null;
+
+      return { items, total: Number(totalRow?.n ?? 0), nextCursor, hasMore };
+    },
+
+    getLatestCommittedObservation,
   } satisfies Storage;
 
   return storage;

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { CATEGORIES, STATUSES, ROLES, BULK_ACTIONS, OWNERSHIPS } from './enums';
-import { nameSchema, emailSchema, passwordSchema, repoUrlSchema, LIMITS } from './limits';
+import { nameSchema, emailSchema, passwordSchema, repoUrlSchema, originSchema, LIMITS } from './limits';
 import { parametersSchema, metadataSchema, sourceRefSchema, confidenceSchema } from './entities';
 
 export const setupInput = z.object({
@@ -61,3 +61,9 @@ export const listTestCasesQuery = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
 export const pageQuery = z.object({ cursor: z.string().optional(), limit: z.coerce.number().int().min(1).max(100).default(50) });
+// GET /testcases/:id/observations(apis/testcases.md「クエリパラメータ」: origin 任意フィルタ + ページング)
+export const observationsQuery = z.object({
+  origin: originSchema.optional(),
+  cursor: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});

@@ -382,5 +382,265 @@ export function runStorageContract(name: string, factory: () => Promise<Contract
       expect(h3.hasMore).toBe(false);
       expect(h3.nextCursor).toBeNull();
     });
+
+    // task-14-brief.md「Step 1: 契約テスト追記」
+    it('testcases: patchTestCase は ok(SET列反映・version bump・history追記)/conflict(存在するが version 不一致・history 追記なし)/not_found(存在しない)を判別する', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-patch' }, now);
+      const created = await ctx.storage.createTestCaseManual(scope, p.id, tcInput({ title: 'old' }), historyEntry(), now);
+
+      const ok = await ctx.storage.patchTestCase(scope, p.id, created.id, {
+        expectedVersion: created.version,
+        columnValues: { title: 'new', version: created.version + 1 },
+        ownershipTransition: false,
+        historyEntries: [{ actor: 'user:abc', action: 'updated', delta: { title: { before: 'old', after: 'new' } } }],
+        now: now + 1,
+      });
+      expect(ok.kind).toBe('ok');
+      if (ok.kind !== 'ok') throw new Error('unreachable');
+      expect(ok.row.title).toBe('new');
+      expect(ok.row.version).toBe(created.version + 1);
+      expect(ok.row.humanUpdatedAt).toBe(now + 1);
+
+      const historyAfterOk = await ctx.storage.listHistory(scope, p.id, created.id, { limit: 10 });
+      expect(historyAfterOk.total).toBe(2); // created + updated
+      expect(historyAfterOk.items.some((h) => h.action === 'updated')).toBe(true);
+
+      // conflict: expectedVersion はもう古い(現在は created.version+1)
+      const conflict = await ctx.storage.patchTestCase(scope, p.id, created.id, {
+        expectedVersion: created.version,
+        columnValues: { title: 'conflicted', version: created.version + 2 },
+        ownershipTransition: false,
+        historyEntries: [{ actor: 'user:abc', action: 'updated', delta: { title: { before: 'new', after: 'conflicted' } } }],
+        now: now + 2,
+      });
+      expect(conflict).toEqual({ kind: 'conflict' });
+      const historyAfterConflict = await ctx.storage.listHistory(scope, p.id, created.id, { limit: 10 });
+      expect(historyAfterConflict.total).toBe(2); // 競合時は history が増えない(phantom entry 無し)
+      const stillNew = await ctx.storage.getTestCase(scope, p.id, created.id);
+      expect(stillNew?.title).toBe('new'); // 書き込まれていない
+
+      const notFound = await ctx.storage.patchTestCase(scope, p.id, '00000000-0000-0000-0000-000000000000', {
+        expectedVersion: 1,
+        columnValues: { title: 'x', version: 2 },
+        ownershipTransition: false,
+        historyEntries: [{ actor: 'user:abc', action: 'updated', delta: {} }],
+        now: now + 3,
+      });
+      expect(notFound).toEqual({ kind: 'not_found' });
+    });
+
+    it('testcases: archiveTestCase は冪等(2回目は同一状態を返し history が増えない)。machine 所有 draft の archive は ownership を human に遷移する(複合不変条件)', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-archive' }, now);
+      const created = await ctx.storage.createTestCaseManual(scope, p.id, tcInput({ title: 'to-archive' }), historyEntry(), now);
+      await ctx.rawExec(`UPDATE test_cases SET ownership='machine' WHERE id='${created.id}'`);
+
+      const archived = await ctx.storage.archiveTestCase(scope, p.id, created.id, 'user:abc', now + 1);
+      expect(archived?.status).toBe('archived');
+      expect(archived?.ownership).toBe('human');
+      expect(archived?.version).toBe(created.version + 1);
+
+      const historyAfterArchive = await ctx.storage.listHistory(scope, p.id, created.id, { limit: 10 });
+      expect(historyAfterArchive.items.filter((h) => h.action === 'status_changed')).toHaveLength(1);
+
+      const again = await ctx.storage.archiveTestCase(scope, p.id, created.id, 'user:abc', now + 2);
+      expect(again?.version).toBe(archived?.version); // 変化なし(冪等)
+      const historyAfterAgain = await ctx.storage.listHistory(scope, p.id, created.id, { limit: 10 });
+      expect(historyAfterAgain.total).toBe(historyAfterArchive.total); // history は増えない
+
+      expect(await ctx.storage.archiveTestCase(scope, p.id, '00000000-0000-0000-0000-000000000000', 'user:abc', now)).toBeNull();
+    });
+
+    it('testcases: bulkAction(approve) は [draft, approved, archived] の混在に対し updated=1/skipped=1/errors=1(archived, VALIDATION_FAILED)。存在しない id は NOT_FOUND。OCC は使用しない', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-bulk' }, now);
+      const draftTc = await ctx.storage.createTestCaseManual(scope, p.id, tcInput({ title: 'd', status: 'draft' }), historyEntry(), now);
+      const approvedTc = await ctx.storage.createTestCaseManual(scope, p.id, tcInput({ title: 'a', status: 'approved' }), historyEntry(), now);
+      const archivedTc = await ctx.storage.createTestCaseManual(scope, p.id, tcInput({ title: 'x', status: 'draft' }), historyEntry(), now);
+      await ctx.rawExec(`UPDATE test_cases SET status='archived' WHERE id='${archivedTc.id}'`);
+      const missingId = '00000000-0000-0000-0000-0000000000aa';
+
+      const result = await ctx.storage.bulkAction(
+        scope, p.id, [draftTc.id, approvedTc.id, archivedTc.id, missingId], 'approve', 'user:abc', now + 1,
+      );
+      expect(result.updated).toBe(1);
+      expect(result.skipped).toBe(1);
+      expect(result.errors).toEqual(expect.arrayContaining([
+        { id: archivedTc.id, code: 'VALIDATION_FAILED', message: expect.any(String) },
+        { id: missingId, code: 'NOT_FOUND', message: expect.any(String) },
+      ]));
+      expect(result.errors).toHaveLength(2);
+
+      const updatedDraft = await ctx.storage.getTestCase(scope, p.id, draftTc.id);
+      expect(updatedDraft?.status).toBe('approved');
+      expect(updatedDraft?.version).toBe(draftTc.version + 1);
+
+      const untouchedApproved = await ctx.storage.getTestCase(scope, p.id, approvedTc.id);
+      expect(untouchedApproved?.version).toBe(approvedTc.version); // skip = 書き込みなし
+
+      const untouchedArchived = await ctx.storage.getTestCase(scope, p.id, archivedTc.id);
+      expect(untouchedArchived?.status).toBe('archived'); // error = 書き込みなし
+      expect(untouchedArchived?.version).toBe(archivedTc.version);
+    });
+
+    it('testcases: bulkAction は machine 所有行を human へ遷移させ、各対象に個別の status_changed 履歴を残す', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-bulk2' }, now);
+      const machineTc = await ctx.storage.createTestCaseManual(scope, p.id, tcInput({ title: 'm', status: 'draft' }), historyEntry(), now);
+      await ctx.rawExec(`UPDATE test_cases SET ownership='machine' WHERE id='${machineTc.id}'`);
+
+      const result = await ctx.storage.bulkAction(scope, p.id, [machineTc.id], 'approve', 'user:abc', now + 1);
+      expect(result.updated).toBe(1);
+      expect(result.errors).toEqual([]);
+
+      const updated = await ctx.storage.getTestCase(scope, p.id, machineTc.id);
+      expect(updated?.ownership).toBe('human');
+      expect(updated?.status).toBe('approved');
+
+      const history = await ctx.storage.listHistory(scope, p.id, machineTc.id, { limit: 10 });
+      expect(history.items.filter((h) => h.action === 'status_changed')).toHaveLength(1);
+    });
+
+    it('testcases: bulkAction(restore) は archived→draft のみ updated、非 archived は skip', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-bulk3' }, now);
+      const archivedTc = await ctx.storage.createTestCaseManual(scope, p.id, tcInput({ title: 'ar' }), historyEntry(), now);
+      await ctx.rawExec(`UPDATE test_cases SET status='archived' WHERE id='${archivedTc.id}'`);
+      const draftTc = await ctx.storage.createTestCaseManual(scope, p.id, tcInput({ title: 'dr' }), historyEntry(), now);
+
+      const result = await ctx.storage.bulkAction(scope, p.id, [archivedTc.id, draftTc.id], 'restore', 'user:abc', now + 1);
+      expect(result.updated).toBe(1);
+      expect(result.skipped).toBe(1);
+      expect(result.errors).toEqual([]);
+
+      expect((await ctx.storage.getTestCase(scope, p.id, archivedTc.id))?.status).toBe('draft');
+      expect((await ctx.storage.getTestCase(scope, p.id, draftTc.id))?.status).toBe('draft'); // skip のまま不変
+    });
+
+    it('testcases: bulkAction は ids に同一 id が重複していても1回分としてのみ処理する(二重計上・二重 history 防止)', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-bulk4' }, now);
+      const draftTc = await ctx.storage.createTestCaseManual(scope, p.id, tcInput({ title: 'dup' }), historyEntry(), now);
+
+      const result = await ctx.storage.bulkAction(scope, p.id, [draftTc.id, draftTc.id], 'approve', 'user:abc', now + 1);
+      expect(result.updated).toBe(1); // 2回ではなく1回
+      expect(result.errors).toEqual([]);
+
+      const updated = await ctx.storage.getTestCase(scope, p.id, draftTc.id);
+      expect(updated?.status).toBe('approved');
+      expect(updated?.version).toBe(draftTc.version + 1); // +2 ではなく+1
+
+      const history = await ctx.storage.listHistory(scope, p.id, draftTc.id, { limit: 10 });
+      expect(history.items.filter((h) => h.action === 'status_changed')).toHaveLength(1); // 2件ではなく1件
+    });
+
+    it('testcases: acceptFingerprint は ok(最新 committed 観測の fingerprint を採用し drift 解消)/conflict/no_drift/not_found を判別する', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-fp' }, now);
+      const created = await ctx.storage.createTestCaseManual(scope, p.id, tcInput({ title: 'fp' }), historyEntry(), now);
+      await ctx.rawExec(`UPDATE test_cases SET drift=1, fingerprint='old-fp', mirror_origin='discovery-v1' WHERE id='${created.id}'`);
+      await ctx.rawExec(
+        `INSERT INTO sync_sessions (token, project_id, origin, status, started_at, expires_at, committed_at) ` +
+        `VALUES ('sess-fp-1', '${p.id}', 'discovery-v1', 'committed', ${now}, ${now + 1000}, ${now})`,
+      );
+      await ctx.rawExec(
+        `INSERT INTO test_case_observations (id, test_case_id, external_ref, project_id, fingerprint, observed, sync_token, origin, created_at) ` +
+        `VALUES ('obs-fp-1', '${created.id}', 'ext-1', '${p.id}', 'new-fp', '{"given":"g","when":"w","then":"t","parameters":[]}', 'sess-fp-1', 'discovery-v1', ${now + 1})`,
+      );
+
+      const current = await ctx.storage.getTestCase(scope, p.id, created.id);
+      const ok = await ctx.storage.acceptFingerprint(scope, p.id, created.id, current!.version, 'user:abc', now + 2);
+      expect(ok.kind).toBe('ok');
+      if (ok.kind !== 'ok') throw new Error('unreachable');
+      expect(ok.row.fingerprint).toBe('new-fp');
+      expect(ok.row.drift).toBe(0);
+      expect(ok.row.version).toBe(current!.version + 1);
+      const historyAfterOk = await ctx.storage.listHistory(scope, p.id, created.id, { limit: 10 });
+      expect(historyAfterOk.items.filter((h) => h.action === 'status_changed')).toHaveLength(1);
+
+      const noDrift = await ctx.storage.acceptFingerprint(scope, p.id, created.id, ok.row.version, 'user:abc', now + 3);
+      expect(noDrift).toEqual({ kind: 'no_drift' });
+
+      await ctx.rawExec(`UPDATE test_cases SET drift=1 WHERE id='${created.id}'`);
+      const conflict = await ctx.storage.acceptFingerprint(scope, p.id, created.id, ok.row.version - 1, 'user:abc', now + 4);
+      expect(conflict).toEqual({ kind: 'conflict' });
+
+      const notFound = await ctx.storage.acceptFingerprint(scope, p.id, '00000000-0000-0000-0000-000000000000', 1, 'user:abc', now);
+      expect(notFound).toEqual({ kind: 'not_found' });
+    });
+
+    it('testcases: listIdentities は test_case_id+project_id スコープの全 identity を返す(ページングなし)', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-ident' }, now);
+      const created = await ctx.storage.createTestCaseManual(scope, p.id, tcInput({ title: 'ident' }), historyEntry(), now);
+      await ctx.rawExec(
+        `INSERT INTO test_case_identities (id, test_case_id, project_id, origin, external_ref, is_stale, last_seen_at, created_at) ` +
+        `VALUES ('idn-1', '${created.id}', '${p.id}', 'discovery-v1', 'ext-1', 0, ${now}, ${now})`,
+      );
+      await ctx.rawExec(
+        `INSERT INTO test_case_identities (id, test_case_id, project_id, origin, external_ref, is_stale, last_seen_at, created_at) ` +
+        `VALUES ('idn-2', '${created.id}', '${p.id}', 'discovery-v2', 'ext-1', 1, ${now}, ${now})`,
+      );
+
+      const rows = await ctx.storage.listIdentities(scope, p.id, created.id);
+      expect(rows.map((r) => r.id).sort()).toEqual(['idn-1', 'idn-2']);
+    });
+
+    it('testcases: listObservations は committed セッション由来のみ返す(active セッションは除外)。origin フィルタで絞り込む', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-obs' }, now);
+      const created = await ctx.storage.createTestCaseManual(scope, p.id, tcInput({ title: 'obs' }), historyEntry(), now);
+
+      await ctx.rawExec(
+        `INSERT INTO sync_sessions (token, project_id, origin, status, started_at, expires_at) ` +
+        `VALUES ('sess-committed', '${p.id}', 'discovery-v1', 'committed', ${now}, ${now + 1000})`,
+      );
+      await ctx.rawExec(
+        `INSERT INTO test_case_observations (id, test_case_id, external_ref, project_id, fingerprint, observed, sync_token, origin, created_at) ` +
+        `VALUES ('obs-committed-1', '${created.id}', 'ext-1', '${p.id}', 'fp1', '{}', 'sess-committed', 'discovery-v1', ${now + 1})`,
+      );
+
+      await ctx.rawExec(
+        `INSERT INTO sync_sessions (token, project_id, origin, status, started_at, expires_at) ` +
+        `VALUES ('sess-active', '${p.id}', 'discovery-v1', 'active', ${now}, ${now + 1000})`,
+      );
+      await ctx.rawExec(
+        `INSERT INTO test_case_observations (id, test_case_id, external_ref, project_id, fingerprint, observed, sync_token, origin, created_at) ` +
+        `VALUES ('obs-active-1', '${created.id}', 'ext-1', '${p.id}', 'fp2', '{}', 'sess-active', 'discovery-v1', ${now + 2})`,
+      );
+
+      const result = await ctx.storage.listObservations(scope, p.id, created.id, { limit: 10 });
+      expect(result.items.map((i) => i.id)).toEqual(['obs-committed-1']); // active 由来は除外
+      expect(result.total).toBe(1);
+
+      const filtered = await ctx.storage.listObservations(scope, p.id, created.id, { origin: 'other-origin', limit: 10 });
+      expect(filtered.items).toHaveLength(0);
+      expect(filtered.total).toBe(0);
+    });
+
+    it('testcases: getLatestCommittedObservation は mirror_origin 一致・committed 由来の最新1件を返す(mirror_origin=null なら null。他 origin の観測は無視)', async () => {
+      const p = await ctx.storage.createProject(scope, { name: 'proj-latest' }, now);
+      const created = await ctx.storage.createTestCaseManual(scope, p.id, tcInput({ title: 'latest' }), historyEntry(), now);
+
+      expect(await ctx.storage.getLatestCommittedObservation(scope, p.id, created.id)).toBeNull();
+
+      await ctx.rawExec(`UPDATE test_cases SET mirror_origin='discovery-v1' WHERE id='${created.id}'`);
+      await ctx.rawExec(
+        `INSERT INTO sync_sessions (token, project_id, origin, status, started_at, expires_at) ` +
+        `VALUES ('sess-latest', '${p.id}', 'discovery-v1', 'committed', ${now}, ${now + 1000})`,
+      );
+      await ctx.rawExec(
+        `INSERT INTO test_case_observations (id, test_case_id, external_ref, project_id, fingerprint, observed, sync_token, origin, created_at) ` +
+        `VALUES ('obs-old', '${created.id}', 'ext-1', '${p.id}', 'fp-old', '{}', 'sess-latest', 'discovery-v1', ${now + 1})`,
+      );
+      await ctx.rawExec(
+        `INSERT INTO test_case_observations (id, test_case_id, external_ref, project_id, fingerprint, observed, sync_token, origin, created_at) ` +
+        `VALUES ('obs-new', '${created.id}', 'ext-1', '${p.id}', 'fp-new', '{}', 'sess-latest', 'discovery-v1', ${now + 2})`,
+      );
+      await ctx.rawExec(
+        `INSERT INTO sync_sessions (token, project_id, origin, status, started_at, expires_at) ` +
+        `VALUES ('sess-other', '${p.id}', 'other-origin', 'committed', ${now}, ${now + 1000})`,
+      );
+      await ctx.rawExec(
+        `INSERT INTO test_case_observations (id, test_case_id, external_ref, project_id, fingerprint, observed, sync_token, origin, created_at) ` +
+        `VALUES ('obs-other', '${created.id}', 'ext-1', '${p.id}', 'fp-other', '{}', 'sess-other', 'other-origin', ${now + 3})`,
+      );
+
+      const latest = await ctx.storage.getLatestCommittedObservation(scope, p.id, created.id);
+      expect(latest?.id).toBe('obs-new');
+      expect(latest?.fingerprint).toBe('fp-new');
+    });
   });
 }

@@ -4,7 +4,11 @@
 // 返す場合があるため、ここでは「その行が持ちうる全フィールド」を返す完全形として定義し、
 // 呼び出し側(setup.ts/auth.ts 等)がドキュメントの契約に合わせて必要なフィールドのみを選び取る。
 // 以後のタスク(ユーザー管理 API 等)がここにシリアライザを追記していく。
-import type { UserRow, OrganizationRow, ProjectRow, ApiTokenRow, TestCaseRow, TestCaseHistoryRow } from '../../storage/schema';
+import type {
+  UserRow, OrganizationRow, ProjectRow, ApiTokenRow, TestCaseRow, TestCaseHistoryRow,
+  TestCaseIdentityRow, TestCaseObservationRow,
+} from '../../storage/schema';
+import { structuredDiff, type GwtP } from '../../domain/diff';
 
 /** apis/users.md(Task 9以降)向けの完全形。last_login_at(D-05)を含む。 */
 export function toUserJson(row: UserRow) {
@@ -126,5 +130,97 @@ export function toHistoryJson(row: TestCaseHistoryRow & { actorDisplay: string }
     delta: JSON.parse(row.delta),
     created_at: row.createdAt,
     actor_display: row.actorDisplay,
+  };
+}
+
+/** apis/testcases.md「GET /testcases/:id/identities」向け。ページングなしの単純な items 配列。 */
+export function toIdentityJson(row: TestCaseIdentityRow) {
+  return {
+    id: row.id,
+    origin: row.origin,
+    external_ref: row.externalRef,
+    is_stale: !!row.isStale,
+    last_seen_at: row.lastSeenAt,
+    created_at: row.createdAt,
+  };
+}
+
+/**
+ * apis/testcases.md「GET /testcases/:id/observations」向け。`observed`(JSON列)は文書化された
+ * 6フィールド(given/when/then/parameters/source_ref/schema_version)のみを選び取る。
+ *
+ * GC-1 突合メモ: data-model.md「observed の固定キーセット」と schemas/sync.ts の `observedSchema`
+ * (Task 1)は `title` も含む7キーだが、apis/testcases.md「GET /testcases/:id/observations」の
+ * `observed` フィールド表には `title` が無い(6キー)。本関数は apis/testcases.md(本タスクの主参照
+ * ドキュメント)のフィールド表どおり6キーに絞り、保存側に title が含まれていても応答からは落とす。
+ * この食い違いはタスク報告に明示する。
+ */
+export function toObservationJson(row: TestCaseObservationRow) {
+  const observed = JSON.parse(row.observed) as Record<string, unknown>;
+  return {
+    id: row.id,
+    origin: row.origin,
+    fingerprint: row.fingerprint,
+    observed: {
+      given: observed.given,
+      when: observed.when,
+      then: observed.then,
+      parameters: observed.parameters,
+      source_ref: observed.source_ref,
+      schema_version: observed.schema_version,
+    },
+    created_at: row.createdAt,
+  };
+}
+
+/**
+ * apis/testcases.md「GET /testcases/:id/diff」向け。has_drift は testCase.drift をそのまま反映する
+ * (再判定しない)。has_drift=false の場合、origin/observed_at/latest_observation/diff は常に null。
+ * latestObservation が渡されない場合(観測が見つからない防御的なケース)は has_drift の値に関わらず
+ * 同様に null で埋める(通常は drift=true のとき必ず観測が存在する前提。data-model.md「drift」)。
+ */
+export function toDiffJson(tc: TestCaseRow, latestObservation: TestCaseObservationRow | null) {
+  const canonical = {
+    given: tc.given,
+    when: tc.when,
+    then: tc.then,
+    parameters: tc.parameters === null ? null : JSON.parse(tc.parameters),
+  };
+  const hasDrift = !!tc.drift;
+
+  if (!hasDrift || !latestObservation) {
+    return { has_drift: hasDrift, origin: null, observed_at: null, canonical, latest_observation: null, diff: null };
+  }
+
+  const observedRaw = JSON.parse(latestObservation.observed) as Record<string, unknown>;
+  const latestObservationGwtp: GwtP = {
+    given: observedRaw.given as string,
+    when: observedRaw.when as string,
+    then: observedRaw.then as string,
+    parameters: (observedRaw.parameters ?? null) as GwtP['parameters'],
+  };
+
+  return {
+    has_drift: true,
+    origin: latestObservation.origin,
+    observed_at: latestObservation.createdAt,
+    canonical,
+    latest_observation: latestObservationGwtp,
+    diff: structuredDiff(canonical, latestObservationGwtp),
+  };
+}
+
+/**
+ * apis/testcases.md「POST /testcases/:id/accept-fingerprint」レスポンス向け(5フィールドの部分集合)。
+ * updated_at の算出は toTestCaseJson と同じ D-05 の意味論を再利用する(重複させない)。
+ */
+export function toAcceptFingerprintJson(row: TestCaseRow) {
+  const full = toTestCaseJson(row);
+  return {
+    id: full.id,
+    fingerprint: full.fingerprint,
+    drift: full.drift,
+    version: full.version,
+    updated_at: full.updated_at,
   };
 }
