@@ -577,6 +577,20 @@ describe('SSR: 管理画面(S-16/S-17 トークン、S-18/S-19 ユーザー、S-
       expect(tagText(await res.text(), 'user-password-error')).toContain('8文字以上');
     });
 
+    it('パスワードが129文字(上限128超・D-06)→ 200 + インラインエラー、作成されない(B6)', async () => {
+      const admin = await setupAndLogin(ctx.app);
+      const res = await ctx.app.request('/admin/users/new', formReq(
+        { email: 'toolong@example.com', display_name: 'TooLong', role: 'editor', password: 'a'.repeat(129), _csrf: admin.csrf ?? '' },
+        { Cookie: cookieHeader(admin.jar) },
+      ));
+      expect(res.status).toBe(200);
+      expect(hasTag(await res.text(), 'user-password-error')).toBe(true);
+
+      // 識別: 作成されていない(そのメールでログインできない)
+      const attempted = await loginAs(ctx.app, 'toolong@example.com', 'a'.repeat(129));
+      expect(attempted.res.status).not.toBe(200);
+    });
+
     it('表示名が空 → 200 + インラインエラー、作成されない', async () => {
       const admin = await setupAndLogin(ctx.app);
       const res = await ctx.app.request('/admin/users/new', formReq(
@@ -756,6 +770,24 @@ describe('SSR: 管理画面(S-16/S-17 トークン、S-18/S-19 ユーザー、S-
       expect(oldLogin.res.status).toBe(200); // 変更されていない
     });
 
+    it('新パスワードが129文字(上限128超・D-06)→ 200 + 再描画、リセットされない(B6)', async () => {
+      const admin = await setupAndLogin(ctx.app);
+      const target = await createUserAndLogin(ctx, admin, { email: 'sato6@example.com', password: 'old-pass-1', displayName: '佐藤六実', role: 'editor' });
+
+      const res = await ctx.app.request(`/admin/users/${target.body.id}/reset-password`, formReq(
+        { new_password: 'a'.repeat(129), _csrf: admin.csrf ?? '' },
+        { Cookie: cookieHeader(admin.jar) },
+      ));
+      expect(res.status).toBe(200);
+      expect(hasTag(await res.text(), 'user-reset-password-input')).toBe(true);
+
+      // 識別: リセットされていない(旧パスワード可・新パスワード不可)
+      const oldLogin = await loginAs(ctx.app, 'sato6@example.com', 'old-pass-1');
+      expect(oldLogin.res.status).toBe(200);
+      const newLogin = await loginAs(ctx.app, 'sato6@example.com', 'a'.repeat(129));
+      expect(newLogin.res.status).not.toBe(200);
+    });
+
     it('editor が POST → 403', async () => {
       const admin = await setupAndLogin(ctx.app);
       const target = await createUserAndLogin(ctx, admin, { email: 'target2@example.com', password: 'old-pass-1', displayName: 'Target Two', role: 'editor' });
@@ -849,6 +881,21 @@ describe('SSR: 管理画面(S-16/S-17 トークン、S-18/S-19 ユーザー、S-
       ));
       expect(res.status).toBe(200);
       expect(tagText(await res.text(), 'password-new-error')).toBe('パスワードは8文字以上で入力してください');
+    });
+
+    it('新パスワードが129文字(上限128超・D-06)→ 200 + password-new-error、変更されない(B6)', async () => {
+      const admin = await setupAndLogin(ctx.app);
+      const tooLong = 'a'.repeat(129);
+      const res = await ctx.app.request('/profile', formReq(
+        { current_password: DEFAULT_SETUP_BODY.admin_password, new_password: tooLong, password_confirm: tooLong, _csrf: admin.csrf ?? '' },
+        { Cookie: cookieHeader(admin.jar) },
+      ));
+      expect(res.status).toBe(200);
+      expect(hasTag(await res.text(), 'password-new-error')).toBe(true);
+
+      // 識別: 変更されていない(旧パスワードで再ログイン可)
+      const oldLogin = await loginAs(ctx.app, DEFAULT_SETUP_BODY.admin_email, DEFAULT_SETUP_BODY.admin_password);
+      expect(oldLogin.res.status).toBe(200);
     });
 
     it('confirm がサーバーに送られても新パスワードと不一致 → サーバーは confirm を見ないため成功する(ドキュメント通り: クライアント側検証のみ)', async () => {

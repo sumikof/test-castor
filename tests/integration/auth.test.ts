@@ -256,6 +256,25 @@ describe('統合: setup + auth API', () => {
       expect(res.status).toBe(403);
     });
 
+    it('new_password が129文字(上限128超) → 422 VALIDATION_FAILED(D-06。B6)、変更されない', async () => {
+      const { jar, csrf } = await setupAndLogin(ctx.app);
+      const res = await ctx.app.request(
+        '/api/v1/auth/password',
+        jsonReq('PATCH', { current_password: DEFAULT_SETUP_BODY.admin_password, new_password: 'a'.repeat(129) }, {
+          Cookie: cookieHeader(jar),
+          'x-csrf-token': csrf ?? '',
+        }),
+      );
+      expect(res.status).toBe(422);
+      const body = await res.json<any>();
+      expect(body.error.code).toBe('VALIDATION_FAILED');
+      expect(body.error.details).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'new_password' })]));
+
+      // 識別: 変更されていない(旧パスワードで引き続きログイン可)
+      const oldLogin = await loginAs(ctx.app, DEFAULT_SETUP_BODY.admin_email, DEFAULT_SETUP_BODY.admin_password);
+      expect(oldLogin.res.status).toBe(200);
+    });
+
     it('成功: 200 {message:"password_changed"}、他セッションは401に無効化・自セッションは200のまま、旧PWでlogin不可・新PWでlogin可', async () => {
       const first = await setupAndLogin(ctx.app); // セッションA
       const second = await loginAs(ctx.app, DEFAULT_SETUP_BODY.admin_email, DEFAULT_SETUP_BODY.admin_password); // 同一ユーザーのセッションB

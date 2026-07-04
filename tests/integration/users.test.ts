@@ -316,6 +316,30 @@ describe('統合: ユーザー管理 API', () => {
       expect((await res.json<any>()).error.code).toBe('VALIDATION_FAILED');
     });
 
+    it('new_password が129文字(上限128超) → 422 VALIDATION_FAILED(D-06。B6)、旧パスワードのまま', async () => {
+      const { jar, csrf } = await setupAndLogin(ctx.app);
+      const createRes = await ctx.app.request(
+        '/api/v1/users',
+        jsonReq('POST', { email: 'target3@example.com', password: 'old-pass-1', display_name: 'Target3', role: 'editor' }, {
+          Cookie: cookieHeader(jar), 'x-csrf-token': csrf ?? '',
+        }),
+      );
+      const created = await createRes.json<any>();
+
+      const res = await ctx.app.request(
+        `/api/v1/users/${created.id}/reset-password`,
+        jsonReq('POST', { new_password: 'a'.repeat(129) }, { Cookie: cookieHeader(jar), 'x-csrf-token': csrf ?? '' }),
+      );
+      expect(res.status).toBe(422);
+      const body = await res.json<any>();
+      expect(body.error.code).toBe('VALIDATION_FAILED');
+      expect(body.error.details).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'new_password' })]));
+
+      // 識別: リセットされていない(旧パスワードで引き続きログイン可)
+      const oldLogin = await loginAs(ctx.app, 'target3@example.com', 'old-pass-1');
+      expect(oldLogin.res.status).toBe(200);
+    });
+
     it('他 org のユーザー ID への reset-password → 404(存在隠蔽)', async () => {
       const { jar, csrf } = await setupAndLogin(ctx.app);
       const other = await ctx.storage.setupOrganization({
