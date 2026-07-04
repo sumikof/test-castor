@@ -807,3 +807,61 @@ form .dialog-actions .btn {
 [data-testid="dialog-machine-warning"] p {
   max-width: 420px;
 }
+
+/* ---- S-16/S-18(Task 21): 管理画面バッジ(トークン状態・ロール) ---- */
+.badge-token-active {
+  background: var(--color-success-bg);
+  color: var(--color-success);
+}
+.badge-token-revoked {
+  background: #eef0f4;
+  color: #8b93a1;
+}
+.badge-role-admin {
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+}
+.badge-role-editor {
+  background: #e6effe;
+  color: #2952cc;
+}
+.badge-role-viewer {
+  background: #eef0f4;
+  color: #5b6472;
+}
+
+/* ---- S-17(Task 21): トークン発行結果ダイアログ ---- */
+.token-plaintext-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  padding: var(--spacing-2);
+  background: var(--color-bg);
+  border-radius: var(--radius);
+  margin: var(--spacing-2) 0;
+}
+.token-plaintext-row code {
+  flex: 1;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.9rem;
+}
+.token-plaintext-row .btn {
+  width: auto;
+  flex-shrink: 0;
+}
+
+/* ---- S-18/S-19(Task 21): ユーザー一覧・現在の行 ---- */
+.user-row-current-label {
+  margin-left: var(--spacing-1);
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+}
+.user-row-current {
+  background: var(--color-bg);
+}
+
+/* ---- S-20(Task 21): パスワードポリシーのリアルタイムフィードバック ---- */
+[data-testid="password-policy-length"].policy-met {
+  color: var(--color-success);
+}

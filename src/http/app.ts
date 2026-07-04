@@ -23,6 +23,9 @@ import { projectPageRoutes } from './ui/projects-pages';
 import { testCasePageRoutes } from './ui/testcase-list';
 import { testCaseFormRoutes } from './ui/testcase-form';
 import { testCaseDetailRoutes } from './ui/testcase-detail';
+import { tokenPageRoutes } from './ui/tokens-pages';
+import { userPageRoutes } from './ui/users-pages';
+import { profilePageRoutes } from './ui/profile-page';
 
 export interface AppDeps {
   storage: Storage;
@@ -91,6 +94,12 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   app.route('/', testCaseFormRoutes);
   // S-10 詳細 + S-11 編集 + S-12 Diff / S-13 Gherkin / S-14 履歴 / Identity タブ(task-20-brief.md)。
   app.route('/', testCaseDetailRoutes);
+  // S-16 API トークン一覧 / S-17 トークン発行結果ダイアログ(task-21-brief.md)。
+  app.route('/', tokenPageRoutes);
+  // S-18 ユーザー一覧 / S-19 ユーザー作成・編集ダイアログ(task-21-brief.md)。
+  app.route('/', userPageRoutes);
+  // S-20 プロフィール・パスワード変更(task-21-brief.md)。
+  app.route('/', profilePageRoutes);
 
   app.onError(errorMiddleware);
   app.notFound(() => {

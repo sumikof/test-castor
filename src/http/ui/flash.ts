@@ -36,6 +36,21 @@ export interface Flash {
  * - testcase_no_drift: S-12「トースト・通知」NO_DRIFT(S-12 の文言を採用。S-10 の同エラーの文言
  *   「乖離が発生していません」とは表現が異なるが、accept-fingerprint は S-12 起点の操作のため
  *   S-12 の文言を正とする。GC-1 乖離としてタスク報告に明記)。
+ * - token_issued: S-17「トースト・通知」発行成功(ダイアログ閉じ後)。
+ * - user_updated: S-18/S-19 のトースト表は「作成成功」「ロール変更成功」「パスワードリセット成功」の
+ *   3パターンのみを定義し、「表示名のみの変更」に対応する文言が無い(ドキュメント未記載)。本実装で
+ *   採番する(タスク報告に明記)。
+ * - user_last_admin_blocked: D-13-7(最後の admin 保護)の 422 をトースト表示する文言。S-19 の
+ *   エラー状態表はこのケース自体を記載していない(ドキュメント未記載。task-21-brief.md が
+ *   「API 側 422 をトースト表示」と明示的に指示しているため、API のメッセージ
+ *   ("cannot demote the last admin")を日本語に敷衍して本実装で採番する。タスク報告に明記)。
+ * - profile_password_changed: S-20「トースト・通知」パスワード変更成功。既存の password_changed
+ *   キー(Task 17 が S-04/S-20 向けに先取り登録したもの)は文言が「再度ログインしてください」で
+ *   S-02(引き継ぎ)の全ログアウト前提の文言のままだが、実装済みの PATCH /auth/password
+ *   (src/http/api/auth.ts)は現在のセッションを除外して無効化する(自分は再ログイン不要)。
+ *   S-20 のトースト文言(「他の端末では再ログインが必要です」)はこの実装済みの副作用と一致するため、
+ *   password_changed を上書きせず新規キーを追加する(GC-1 乖離としてタスク報告に明記。
+ *   password_changed 自体は今後の別画面向けに変更しない)。
  */
 const FLASH_MESSAGES: Record<string, Flash> = {
   setup_complete: { kind: 'success', text: 'セットアップが完了しました。ログインしてください' },
@@ -57,6 +72,10 @@ const FLASH_MESSAGES: Record<string, Flash> = {
   occ_conflict: { kind: 'error', text: '更新が競合しました。最新の内容を確認してください' },
   testcase_drift_accepted: { kind: 'success', text: 'drift を解消しました' },
   testcase_no_drift: { kind: 'warn', text: 'このテストケースには drift が発生していません。' },
+  token_issued: { kind: 'success', text: 'トークンを発行しました' },
+  user_updated: { kind: 'success', text: 'ユーザー情報を更新しました' },
+  user_last_admin_blocked: { kind: 'error', text: '最後の管理者の権限を変更することはできません' },
+  profile_password_changed: { kind: 'success', text: 'パスワードを変更しました。他の端末では再ログインが必要です' },
 };
 
 /** 未知のキー・未指定は null(呼び出し側は「トーストを表示しない」として扱う)。 */
