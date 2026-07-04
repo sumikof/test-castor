@@ -42,4 +42,19 @@ describe('node-ts-loader(D1)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('throw の stack が .ts の元行番号で出る(D2: inline sourcemap + --enable-source-maps)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tms-loader-'));
+    try {
+      const f = join(dir, 'boom.ts');
+      // 型注釈を transpile で除去させ、行番号がズレうる状況を作った上で 4 行目の throw を検証する
+      writeFileSync(f, "const pad: number = 1;\nvoid pad;\n\nthrow new Error('boom-at-line-4');\n");
+      const r = runNode(['--enable-source-maps', '--import', LOADER, f]);
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toContain('boom-at-line-4');
+      expect(r.stderr).toMatch(/boom\.ts:4/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

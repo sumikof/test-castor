@@ -62,7 +62,12 @@ registerHooks({
       const path = fileURLToPath(url);
       const source = readFileSync(path, 'utf8');
       const { outputText, diagnostics } = ts.transpileModule(source, {
-        compilerOptions, fileName: path, reportDiagnostics: true,
+        // HANDOVER D2: inline sourcemap を埋め込み、`node --enable-source-maps`(package.json の
+        // start:node / maintenance:node に設定済み)でスタックトレースを .ts の元行番号に写像する。
+        // tsconfig は noEmit:true のため sourceMap 系はここでだけ上書きする(tsc --noEmit は
+        // sourceMap オプションと併用不可)。
+        compilerOptions: { ...compilerOptions, sourceMap: false, inlineSourceMap: true, inlineSources: true },
+        fileName: path, reportDiagnostics: true,
       });
       // HANDOVER D1: transpile 段階の構文エラー(や isolatedModules 非互換)を、後段の不明瞭な
       // ランタイム SyntaxError にせず、ファイル名・行番号付きの診断メッセージで即座に落とす。

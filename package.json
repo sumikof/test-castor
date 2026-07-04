@@ -9,8 +9,8 @@
     "test:workers": "vitest run --config vitest.workers.config.ts",
     "test": "npm run test:unit && npm run test:workers",
     "db:generate": "drizzle-kit generate",
-    "start:node": "node --import ./src/entry/node-ts-loader.mjs src/entry/node.ts",
-    "maintenance:node": "node --import ./src/entry/node-ts-loader.mjs src/entry/maintenance-cli.ts",
+    "start:node": "node --enable-source-maps --import ./src/entry/node-ts-loader.mjs src/entry/node.ts",
+    "maintenance:node": "node --enable-source-maps --import ./src/entry/node-ts-loader.mjs src/entry/maintenance-cli.ts",
     "postinstall": "node -e \"require('fs').copyFileSync(require.resolve('htmx.org/dist/htmx.min.js'),'public/htmx.min.js')\""
   },
   "dependencies": {
