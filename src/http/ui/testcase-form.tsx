@@ -170,26 +170,33 @@ export function zodIssuesToFormErrors(issues: Array<{ path: PropertyKey[]; messa
   return errors;
 }
 
-/** 検証済みフォーム値 → createTestCaseInput の入力形へ(parameters/metadata は空なら未指定=省略)。 */
-export function buildTestCasePayload(v: TestCaseFormValues) {
+/**
+ * create(省略=未指定)と PATCH(null=クリア)で「空」の表現だけが異なる(HANDOVER C2)。
+ * absent 哨兵をパラメータ化して行マッピングを単一実装に保つ。差異を将来ここ以外に足さないこと。
+ */
+export function buildTestCaseFields<A extends null | undefined>(v: TestCaseFormValues, absent: A) {
   const parameters = v.parameters.length > 0
     ? v.parameters.map((row) => ({
       ...(row.name.trim() ? { name: row.name.trim() } : {}),
       inputs: JSON.parse(row.inputs) as unknown,
       expected: row.expected as unknown,
     }))
-    : undefined;
-  const metadata = v.tags.length > 0 ? { tags: v.tags } : undefined;
+    : absent;
   return {
     title: v.title.trim(),
-    target: v.target.trim() ? v.target.trim() : undefined,
+    target: v.target.trim() ? v.target.trim() : absent,
     category: v.category,
     given: v.given,
     when: v.when,
     then: v.then,
     parameters,
-    metadata,
+    metadata: v.tags.length > 0 ? { tags: v.tags } : absent,
   };
+}
+
+/** 検証済みフォーム値 → createTestCaseInput の入力形へ(parameters/metadata は空なら未指定=省略)。 */
+export function buildTestCasePayload(v: TestCaseFormValues) {
+  return buildTestCaseFields(v, undefined);
 }
 
 // --- 動的行(パラメータ・タグ)の最小 inline JS ---

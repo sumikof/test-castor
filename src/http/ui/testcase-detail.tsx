@@ -34,7 +34,7 @@ import { Layout } from './layout';
 import { CATEGORY_LABEL, formatDateTime, renderProjectNotFound } from './testcase-list';
 import {
   TestCaseFieldsForm, testCaseRowToFormValues, parseTestCaseFormBody, validateTestCaseForm,
-  zodIssuesToFormErrors, readString,
+  zodIssuesToFormErrors, readString, buildTestCaseFields,
   type RawBody, type TestCaseFormValues, type TestCaseFormErrors,
 } from './testcase-form';
 import { STATUSES } from '../../schemas/enums';
@@ -312,24 +312,9 @@ function TestCaseEditForm(props: {
   );
 }
 
+/** 検証済みフォーム値 → patchTestCaseInput の入力形へ(空は null = クリア指示。create との差は absent 哨兵のみ)。 */
 function buildEditPatchInput(v: TestCaseFormValues) {
-  const parameters = v.parameters.length > 0
-    ? v.parameters.map((row) => ({
-      ...(row.name.trim() ? { name: row.name.trim() } : {}),
-      inputs: JSON.parse(row.inputs) as unknown,
-      expected: row.expected as unknown,
-    }))
-    : null;
-  return {
-    title: v.title.trim(),
-    target: v.target.trim() ? v.target.trim() : null,
-    category: v.category,
-    given: v.given,
-    when: v.when,
-    then: v.then,
-    parameters,
-    metadata: v.tags.length > 0 ? { tags: v.tags } : null,
-  };
+  return buildTestCaseFields(v, null);
 }
 
 // --- S-12 構造化Diff タブ ---
