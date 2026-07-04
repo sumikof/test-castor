@@ -29,6 +29,7 @@ import { csrfProtect } from '../middleware/csrf';
 import { ensureCsrfCookie, requirePageAuth } from '../middleware/page-auth';
 import { orgScopeOf } from '../middleware/scope';
 import { resolveFlash, type Flash } from './flash';
+import { requiredParam } from './params';
 import { Layout } from './layout';
 import { CATEGORY_LABEL, formatDateTime, renderProjectNotFound } from './testcase-list';
 import {
@@ -697,18 +698,6 @@ interface LoadedContext {
 // response は Response | Promise<Response>(Hono の c.html() は JSX 引数の型上 Promise を返しうる
 // シグネチャのため。呼び出し側の route ハンドラは async 関数なのでそのまま return して問題ない)。
 type ContextResult = LoadedContext | { kind: 'response'; response: Response | Promise<Response> };
-
-/**
- * `c.req.param(name)` は Hono のルート単位のパスリテラル型推論があって初めて `string`(param 無しは
- * `string | undefined`)を返す。loadContext はどのルートからも呼ばれる独立関数のため、その推論の
- * 恩恵を受けられず `Context<AppEnv>`(パス情報無し)としてしか受け取れない。この2つの動的セグメント
- * (`:pid`/`:id`)は本ファイルの全ルート登録が必ず持つため、実行時には常に存在する契約として扱う。
- */
-function requiredParam(c: Context<AppEnv>, name: string): string {
-  const v = c.req.param(name);
-  if (v === undefined) throw new AppError('NOT_FOUND', 404, `missing path param: ${name}`);
-  return v;
-}
 
 async function loadContext(c: Context<AppEnv>): Promise<ContextResult> {
   const deps = c.get('deps');

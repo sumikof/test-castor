@@ -31,6 +31,7 @@ import { csrfProtect } from '../middleware/csrf';
 import { ensureCsrfCookie, requirePageAuth } from '../middleware/page-auth';
 import { orgScopeOf } from '../middleware/scope';
 import { resolveFlash, type Flash } from './flash';
+import { requiredParam } from './params';
 import { Layout } from './layout';
 import { formatDateTime } from './testcase-list';
 import { nameSchema, emailSchema, passwordSchema, LIMITS } from '../../schemas/limits';
@@ -390,14 +391,6 @@ function resolveUserFlash(c: Context<AppEnv>): Flash | null {
 }
 
 // --- 共通コンテキスト解決 ---
-
-/** testcase-detail.tsx の requiredParam と同じ理由(独立関数はルート単位のパスリテラル型推論の
- * 恩恵を受けられないため、動的セグメントの存在を実行時契約として扱う)。 */
-function requiredParam(c: Context<AppEnv>, name: string): string {
-  const v = c.req.param(name);
-  if (v === undefined) throw new AppError('NOT_FOUND', 404, `missing path param: ${name}`);
-  return v;
-}
 
 function getActorUser(c: Context<AppEnv>): UserRow {
   const actor = c.get('actor');

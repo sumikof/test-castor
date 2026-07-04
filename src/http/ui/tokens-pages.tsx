@@ -30,6 +30,7 @@ import { csrfProtect } from '../middleware/csrf';
 import { ensureCsrfCookie, requirePageAuth } from '../middleware/page-auth';
 import { orgScopeOf } from '../middleware/scope';
 import { resolveFlash, type Flash } from './flash';
+import { requiredParam } from './params';
 import { Layout } from './layout';
 import { renderProjectNotFound, formatDateTime } from './testcase-list';
 import { nameSchema, LIMITS } from '../../schemas/limits';
@@ -305,14 +306,6 @@ function TokensPage(props: TokensPageProps) {
 }
 
 // --- 共通コンテキスト解決 ---
-
-/** testcase-detail.tsx の requiredParam と同じ理由(この関数は個別ルートのパスリテラル型推論の
- * 恩恵を受けられない独立関数のため、動的セグメントの有無を実行時契約として扱う)。 */
-function requiredParam(c: Context<AppEnv>, name: string): string {
-  const v = c.req.param(name);
-  if (v === undefined) throw new AppError('NOT_FOUND', 404, `missing path param: ${name}`);
-  return v;
-}
 
 interface LoadedTokensContext {
   kind: 'ok';
