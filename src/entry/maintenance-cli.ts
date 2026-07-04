@@ -42,12 +42,20 @@ export async function runMaintenanceCli(dataPath = process.env.TMS_DB_PATH ?? '.
   }
 }
 
-if (import.meta.main) {
-  runMaintenanceCli().catch((err) => {
+/** CLI 失敗ラッパー(HANDOVER B8: テスト可能にするため export。import.meta.main はこれを呼ぶだけ)。
+ * 失敗時は `maintenance_cli_failed` の構造化 JSON を stderr へ 1 行出し、exitCode=1 を設定する(throw しない)。 */
+export async function maintenanceCliMain(dataPath?: string): Promise<void> {
+  try {
+    await runMaintenanceCli(dataPath);
+  } catch (err) {
     console.error(JSON.stringify({
       event: 'maintenance_cli_failed',
       error: err instanceof Error ? err.message : String(err),
     }));
     process.exitCode = 1;
-  });
+  }
+}
+
+if (import.meta.main) {
+  void maintenanceCliMain();
 }
