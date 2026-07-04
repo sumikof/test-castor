@@ -48,7 +48,7 @@
 | 要素名 | 種別 | data-testid | 必須/任意 | バリデーション | 条件付き表示 |
 |---|---|---|---|---|---|
 | プロジェクト名ラベル | label | `project-name-label` | — | — | — |
-| プロジェクト名入力 | text-input | `project-name-input` | **必須** | 空文字不可。組織内で一意 | — |
+| プロジェクト名入力 | text-input | `project-name-input` | **必須** | 空文字不可 | — |
 | プロジェクト名エラー | error-text | `project-name-error` | — | バリデーションエラーメッセージ | バリデーション失敗時 |
 | リポジトリ URL ラベル | label | `project-repo-label` | — | — | — |
 | リポジトリ URL 入力 | text-input | `project-repo-input` | 任意 | URL 形式（入力時）。空の場合は null として送信 | — |
