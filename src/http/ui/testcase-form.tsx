@@ -76,9 +76,11 @@ export function testCaseRowToFormValues(row: TestCaseRow): TestCaseFormValues {
 
 // --- フォーム本文(application/x-www-form-urlencoded)のパース ---
 
-type RawBody = Record<string, string | File | (string | File)[]>;
+// review round 1 #1(Important): testcase-detail.tsx(S-11 編集保存等)からも再利用するため export する
+// (元々は本ファイル・testcase-detail.tsx の双方に byte-for-byte 同一の型/関数が独立定義されていた重複)。
+export type RawBody = Record<string, string | File | (string | File)[]>;
 
-function readString(body: RawBody, key: string): string {
+export function readString(body: RawBody, key: string): string {
   const v = body[key];
   if (Array.isArray(v)) return String(v[0] ?? '');
   return v === undefined ? '' : String(v);

@@ -329,6 +329,38 @@ describe('SSR: テストケース作成/詳細/編集 + タブ(S-09〜S-14)', ()
       expect(historyHtml).toContain(newThen);
     });
 
+    // review round 1 #2(Important): create ルートは createTestCaseInput.safeParse で
+    // parameters/metadata の byte 上限(LIMITS.parametersBytes/metadataBytes)を強制するが、
+    // 編集保存ルートは validateTestCaseForm(JS文字列長のみ)しか通さず zod の byte 上限検証を
+    // 一切行っていなかった(修正前はこのテストが FAIL する: 保存されて 303 になる)。
+    it('編集保存: metadata が byte 上限(10KB)を超える → 保存されず 200 で再描画される(review round 1 #2)', async () => {
+      const admin = await setupAndLogin(ctx.app);
+      const { body: project } = await createProject(ctx.app, admin, 'edit-bytecap-svc');
+      const { id } = await createViaForm(ctx, admin, project.id);
+      const version = await getEditVersion(ctx, admin.jar, project.id, id);
+
+      // 単一の巨大タグで metadata の JSON 化後サイズが LIMITS.metadataBytes(10KB)を超える値を作る。
+      const hugeTag = 'x'.repeat(12_000);
+      const attemptedThen = '巨大メタデータでの上書き試行(保存されてはいけない)';
+      const res = await ctx.app.request(
+        `/projects/${project.id}/testcases/${id}/edit`,
+        multiFormReq(
+          [
+            ...Object.entries({ ...BASE_FIELDS, then: attemptedThen, version: String(version), _csrf: admin.csrf ?? '' }),
+            ['tags[]', hugeTag],
+          ],
+          { Cookie: cookieHeader(admin.jar) },
+        ),
+      );
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(hasTag(html, 'edit-form-error')).toBe(true);
+
+      const { html: detailHtml } = await getDetail(ctx, admin.jar, project.id, id);
+      expect(tagText(detailHtml, 'display-then')).toBe(BASE_FIELDS.then);
+      expect(tagText(detailHtml, 'display-version')).toBe('バージョン: 1');
+    });
+
     it('古い version で保存 → 200 で occ-conflict-banner + btn-reload-latest を表示。保存内容は反映されない', async () => {
       const admin = await setupAndLogin(ctx.app);
       const { body: project } = await createProject(ctx.app, admin, 'occ-svc');
@@ -348,9 +380,52 @@ describe('SSR: テストケース作成/詳細/編集 + タブ(S-09〜S-14)', ()
       expect(hasTag(html, 'occ-conflict-banner')).toBe(true);
       expect(hasTag(html, 'btn-reload-latest')).toBe(true);
 
+      // review round 1 #3(Important・human 所有行側の回帰確認): human 所有行では元々 machine 警告
+      // ゲートが無いため、再読み込みリンクに confirmed=1 は付かない。実際にたどっても編集フォームへ
+      // 直接戻ることを確認する(この部分は修正前後どちらでも成立するはずの現状維持アサーション)。
+      const reloadHref = attrValue(findTag(html, 'btn-reload-latest'), 'href') as string;
+      expect(reloadHref).not.toContain('confirmed=1');
+      const followed = await ctx.app.request(reloadHref, { headers: { Cookie: cookieHeader(admin.jar) } });
+      expect(followed.status).toBe(200);
+      const followedHtml = await followed.text();
+      expect(hasTag(followedHtml, 'edit-input-title')).toBe(true);
+
       const { html: detailHtml } = await getDetail(ctx, admin.jar, project.id, id);
       expect(tagText(detailHtml, 'testcase-title')).toBe('並行更新後のタイトル');
       expect(detailHtml).not.toContain('古いバージョンからの上書き試行');
+    });
+
+    // review round 1 #3(Important): TestCaseEditForm の btn-reload-latest href は edit action を
+    // そのまま再利用しており、machine 所有行の OCC 競合時にも confirmed=1 を持たない。そのためリンクを
+    // たどると GET /edit が machine 警告ダイアログを再表示してしまい、S-11 画面遷移表
+    // 「OCC 競合 → 再読み込み | S-11 編集モード(最新データで再描画)」に反する(修正前はこのテストが
+    // FAIL する: href に confirmed=1 が含まれず、機械警告ダイアログを経由してしまう)。
+    it('OCC 競合(machine 所有行): btn-reload-latest が confirmed=1 を含み、machine 警告を経由せず編集フォームへ直接戻る(review round 1 #3)', async () => {
+      const admin = await setupAndLogin(ctx.app);
+      const { body: project } = await createProject(ctx.app, admin, 'occ-machine-svc');
+      const { id } = await createViaForm(ctx, admin, project.id);
+      await ctx.rawExec(`UPDATE test_cases SET ownership = 'machine', mirror_origin = 'discovery-v1' WHERE id = ${sqlStr(id)}`);
+      // 別の書き込み(Discovery 側の同期等)が先に version だけを進めた状態をシミュレート(ownership は machine のまま)。
+      await ctx.rawExec(`UPDATE test_cases SET version = 2 WHERE id = ${sqlStr(id)}`);
+
+      const res = await ctx.app.request(
+        `/projects/${project.id}/testcases/${id}/edit`,
+        formReq(
+          { ...BASE_FIELDS, then: '機械所有行のOCC再現用の上書き試行', version: '1', _csrf: admin.csrf ?? '' },
+          { Cookie: cookieHeader(admin.jar) },
+        ),
+      );
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(hasTag(html, 'occ-conflict-banner')).toBe(true);
+      const reloadHref = attrValue(findTag(html, 'btn-reload-latest'), 'href') as string;
+      expect(reloadHref).toContain('confirmed=1');
+
+      const followed = await ctx.app.request(reloadHref, { headers: { Cookie: cookieHeader(admin.jar) } });
+      expect(followed.status).toBe(200);
+      const followedHtml = await followed.text();
+      expect(hasTag(followedHtml, 'dialog-machine-warning')).toBe(false);
+      expect(hasTag(followedHtml, 'edit-input-title')).toBe(true);
     });
 
     it('draft→approved: ステータス確認ダイアログ→実行で成功し flash「テストケースを承認しました」', async () => {

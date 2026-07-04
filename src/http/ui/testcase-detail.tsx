@@ -33,7 +33,8 @@ import { Layout } from './layout';
 import { CATEGORY_LABEL, formatDateTime, renderProjectNotFound } from './testcase-list';
 import {
   TestCaseFieldsForm, testCaseRowToFormValues, parseTestCaseFormBody, validateTestCaseForm,
-  type TestCaseFormValues, type TestCaseFormErrors,
+  zodIssuesToFormErrors, readString,
+  type RawBody, type TestCaseFormValues, type TestCaseFormErrors,
 } from './testcase-form';
 import { STATUSES } from '../../schemas/enums';
 import type { Status, Category, Ownership, Role, HistoryAction } from '../../schemas/enums';
@@ -42,15 +43,9 @@ import type { ParamRow } from '../../domain/testcase-rules';
 import { buildHistoryEntries } from '../../domain/history-delta';
 import { renderGherkin } from '../../domain/gherkin';
 import { toDiffJson } from '../api/serializers';
+import { patchTestCaseInput } from '../../schemas/api';
 import type { Paged } from '../../storage/interface';
 import type { ProjectRow, UserRow, TestCaseRow, TestCaseHistoryRow, TestCaseIdentityRow } from '../../storage/schema';
-
-type RawBody = Record<string, string | File | (string | File)[]>;
-function readStr(body: RawBody, key: string): string {
-  const v = body[key];
-  if (Array.isArray(v)) return String(v[0] ?? '');
-  return v === undefined ? '' : String(v);
-}
 
 // --- 汎用ヘルパ ---
 
@@ -281,18 +276,25 @@ function MachineWarningDialog(props: { pid: string; id: string }) {
 
 function TestCaseEditForm(props: {
   pid: string; id: string; csrf: string; version: number;
-  values: TestCaseFormValues; errors: TestCaseFormErrors; occConflict?: boolean;
+  values: TestCaseFormValues; errors: TestCaseFormErrors; occConflict?: boolean; ownership: Ownership;
 }) {
-  const { pid, id, csrf, version, values, errors, occConflict } = props;
+  const { pid, id, csrf, version, values, errors, occConflict, ownership } = props;
   const action = `/projects/${pid}/testcases/${id}/edit`;
   const viewUrl = `/projects/${pid}/testcases/${id}`;
+  // review round 1 #3(Important): OCC 競合時の再読み込みリンクは GET /edit へ遷移する。この行が
+  // ownership=machine の場合、confirmed=1 を付けないと GET /edit ハンドラ(~845行)が machine 警告
+  // ダイアログを再度表示してしまい、S-11「画面遷移: OCC 競合 → 再読み込み | S-11 編集モード(最新データで
+  // 再描画)」(docs/screens/testcase/S-11-testcase-edit.md:204)に反する(一度警告を承認して編集画面に
+  // 入っているユーザーを、再読み込みのたびに警告へ差し戻すのは文書の期待と矛盾する)。human 所有行は
+  // 元々警告ゲートが無いため confirmed=1 を付けない(素の URL のまま。挙動不変)。
+  const reloadUrl = ownership === 'machine' ? `${action}?confirmed=1` : action;
   return (
     <div data-testid="testcase-edit-mode">
       {errors.form && <div class="alert alert-error" data-testid="edit-form-error">{errors.form}</div>}
       {occConflict && (
         <div class="alert alert-error" data-testid="occ-conflict-banner">
           他のユーザーが先に更新しました。最新の内容を確認してください。
-          <a href={action} class="btn btn-secondary" data-testid="btn-reload-latest">最新の内容を読み込む</a>
+          <a href={reloadUrl} class="btn btn-secondary" data-testid="btn-reload-latest">最新の内容を読み込む</a>
         </div>
       )}
       <form method="post" action={action} novalidate data-validate data-testid="testcase-edit-form">
@@ -852,7 +854,12 @@ export const testCaseDetailRoutes = new Hono<AppEnv>()
 
     const panel = tc.ownership === 'machine' && !confirmed
       ? <MachineWarningDialog pid={pid} id={id} />
-      : <TestCaseEditForm pid={pid} id={id} csrf={csrf} version={tc.version} values={testCaseRowToFormValues(tc)} errors={{}} />;
+      : (
+        <TestCaseEditForm
+          pid={pid} id={id} csrf={csrf} version={tc.version} values={testCaseRowToFormValues(tc)} errors={{}}
+          ownership={tc.ownership as Ownership}
+        />
+      );
 
     if (c.req.header('HX-Request')) return c.html(panel);
 
@@ -873,7 +880,7 @@ export const testCaseDetailRoutes = new Hono<AppEnv>()
     const id = current.id;
 
     const rawBody = (await c.req.parseBody()) as RawBody;
-    const formVersion = Number(readStr(rawBody, 'version'));
+    const formVersion = Number(readString(rawBody, 'version'));
     const values = parseTestCaseFormBody(rawBody);
     const fieldErrors = validateTestCaseForm(values);
 
@@ -881,7 +888,7 @@ export const testCaseDetailRoutes = new Hono<AppEnv>()
       const panel = (
         <TestCaseEditForm
           pid={pid} id={id} csrf={csrf} version={Number.isFinite(formVersion) ? formVersion : current.version}
-          values={values} errors={errors} occConflict={occConflict}
+          values={values} errors={errors} occConflict={occConflict} ownership={current.ownership as Ownership}
         />
       );
       return c.html(
@@ -892,8 +899,20 @@ export const testCaseDetailRoutes = new Hono<AppEnv>()
 
     if (Object.keys(fieldErrors).length > 0) return rerender(fieldErrors);
 
+    // review round 1 #2(Important): create ルート(testcase-form.tsx)は createTestCaseInput.safeParse
+    // で parameters/metadata の byte 上限(LIMITS.parametersBytes/metadataBytes)を強制するが、この
+    // 編集保存ルートは validateTestCaseForm(JS文字列長のみ)しか通していなかったため、SSR 編集フォーム
+    // 経由でのみ byte 上限を回避できてしまっていた。API の PATCH(src/http/api/testcases.ts)が
+    // zValidator('json', patchTestCaseInput, ...) を通すのと同じ検証をここでも行い、両ルートで
+    // 上限を揃える。
     const patchInput = buildEditPatchInput(values);
-    const patchResult = computeHumanPatch(current, patchInput);
+    const parsed = patchTestCaseInput.safeParse(patchInput);
+    if (!parsed.success) {
+      const zodErrors = zodIssuesToFormErrors(parsed.error.issues);
+      return rerender(zodErrors);
+    }
+
+    const patchResult = computeHumanPatch(current, parsed.data);
     // 編集フォームは status を送らないため canTransition 違反は構造上発生しない(型の discriminated
     // union を満たすための防御的分岐)。
     if (!patchResult.ok) return rerender({ form: 'この操作は許可されていません' });
@@ -959,8 +978,8 @@ export const testCaseDetailRoutes = new Hono<AppEnv>()
     const id = current.id;
 
     const rawBody = (await c.req.parseBody()) as RawBody;
-    const toRaw = readStr(rawBody, 'to');
-    const formVersion = Number(readStr(rawBody, 'version'));
+    const toRaw = readString(rawBody, 'to');
+    const formVersion = Number(readString(rawBody, 'version'));
     const validTo = (STATUSES as readonly string[]).includes(toRaw) ? (toRaw as Status) : undefined;
 
     const patchResult = computeHumanPatch(current, { status: validTo });
@@ -1023,7 +1042,7 @@ export const testCaseDetailRoutes = new Hono<AppEnv>()
     const id = c.req.param('id');
 
     const rawBody = (await c.req.parseBody()) as RawBody;
-    const formVersion = Number(readStr(rawBody, 'version'));
+    const formVersion = Number(readString(rawBody, 'version'));
     const result = await deps.storage.acceptFingerprint(
       orgScopeOf(actor), pid, id, Number.isFinite(formVersion) ? formVersion : -1, `user:${actor.user.id}`, deps.now(),
     );
