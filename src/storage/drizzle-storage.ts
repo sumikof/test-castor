@@ -1087,6 +1087,15 @@ export function createDrizzleStorage(driver: StorageDriver): Storage {
             LIMIT ${windowLimit}
           )`),
         // 工程6: Drift 記録。human-owned・非 archived のみ対象(fingerprint=null の手動作成は未評価)。
+        // review round(FINAL whole-branch review Finding 1・CRITICAL): `AND drift = 0` は工程3
+        // (`last_seen_sync_token IS NOT :T OR is_stale != 0`)/工程4(`is_stale = 0`)/工程7
+        // (`is_stale != <計算値>`)と同じ「既に確定済みの行を対象から外す」自己排他述語。これが無いと
+        // 一度 drift=1 になった行が(accept-fingerprint で drift を解消するまで)ずっと述語に留まり続け、
+        // SQLite が same-value UPDATE でも changes() を1件と数える性質と相まって
+        // (a) windowLimit 超の drift 対象origin では毎回 count==windowLimit のままで `more` が
+        //     false にならない(windowed-resume livelock)、
+        // (b) 変化の無い再同期でも system_updated_at が commit のたびに bump される(D-05 違反)
+        // という2つの不具合を招く(tests/unit/sync-commit.test.ts の regression 参照)。
         db.update(testCases)
           .set({ drift: 1, systemUpdatedAt: now })
           .where(sql`rowid IN (
@@ -1094,6 +1103,7 @@ export function createDrizzleStorage(driver: StorageDriver): Storage {
             WHERE project_id = ${pid} AND ownership = 'human' AND status != 'archived' AND mirror_origin = ${origin}
               AND fingerprint IS NOT NULL
               AND fingerprint != ${latestObservationSubquery(pid, origin, token, sql`o.fingerprint`)}
+              AND drift = 0
             LIMIT ${windowLimit}
           )`),
         // 工程7: Canonical Rollup。project 全体(origin 不問)が対象。approved/archived は保護。
