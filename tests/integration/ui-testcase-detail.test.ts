@@ -362,6 +362,57 @@ describe('SSR: テストケース作成/詳細/編集 + タブ(S-09〜S-14)', ()
       expect(tagText(detailHtml, 'display-version')).toBe('バージョン: 1');
     });
 
+    // B5(HANDOVER §4.2): metadata(10KB)と同一コードパス(patchTestCaseInput.safeParse)だが、
+    // parameters(100KB)専用の回帰テストが無かった穴を塞ぐ。境界の対照(上限内は保存成功)も置き、
+    // 「上限値が判定要因である」ことを識別的に証明する。
+    it('編集保存: parameters が byte 上限(100KB)を超える → 保存されず 200 で再描画(B5)', async () => {
+      const admin = await setupAndLogin(ctx.app);
+      const { body: project } = await createProject(ctx.app, admin, 'edit-param-cap-svc');
+      const { id } = await createViaForm(ctx, admin, project.id);
+      const version = await getEditVersion(ctx, admin.jar, project.id, id);
+
+      // JSON.stringify(parameters) が 100*1024 bytes を超える巨大 inputs(JSON テキストとしては正当)
+      const hugeInputs = JSON.stringify({ big: 'x'.repeat(105 * 1024) });
+      const res = await ctx.app.request(
+        `/projects/${project.id}/testcases/${id}/edit`,
+        multiFormReq(
+          [
+            ...Object.entries({ ...BASE_FIELDS, version: String(version), _csrf: admin.csrf ?? '' }),
+            ['param_name[]', 'huge'], ['param_inputs[]', hugeInputs], ['param_expected[]', 'ok'],
+          ],
+          { Cookie: cookieHeader(admin.jar) },
+        ),
+      );
+      expect(res.status).toBe(200);
+      expect(hasTag(await res.text(), 'edit-form-error')).toBe(true);
+
+      const { html: detailHtml } = await getDetail(ctx, admin.jar, project.id, id);
+      expect(tagText(detailHtml, 'display-version')).toBe('バージョン: 1'); // 保存されていない(識別)
+    });
+
+    it('編集保存: parameters が上限内(~90KB)なら保存される(B5 境界の対照)', async () => {
+      const admin = await setupAndLogin(ctx.app);
+      const { body: project } = await createProject(ctx.app, admin, 'edit-param-ok-svc');
+      const { id } = await createViaForm(ctx, admin, project.id);
+      const version = await getEditVersion(ctx, admin.jar, project.id, id);
+
+      const okInputs = JSON.stringify({ big: 'x'.repeat(90 * 1024) }); // ~92KB < 100KB
+      const res = await ctx.app.request(
+        `/projects/${project.id}/testcases/${id}/edit`,
+        multiFormReq(
+          [
+            ...Object.entries({ ...BASE_FIELDS, version: String(version), _csrf: admin.csrf ?? '' }),
+            ['param_name[]', 'large-ok'], ['param_inputs[]', okInputs], ['param_expected[]', 'ok'],
+          ],
+          { Cookie: cookieHeader(admin.jar) },
+        ),
+      );
+      expect(res.status).toBe(303); // 保存成功
+
+      const { html: detailHtml } = await getDetail(ctx, admin.jar, project.id, id);
+      expect(tagText(detailHtml, 'display-version')).toBe('バージョン: 2'); // version が進む(識別)
+    });
+
     it('古い version で保存 → 200 で occ-conflict-banner + btn-reload-latest を表示。保存内容は反映されない', async () => {
       const admin = await setupAndLogin(ctx.app);
       const { body: project } = await createProject(ctx.app, admin, 'occ-svc');
