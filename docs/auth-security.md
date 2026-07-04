@@ -36,9 +36,17 @@ $pbkdf2-sha256$i=600000$<16-byte-CSPRNG-salt-base64>$<hash-base64>
 - **透過再ハッシュ:** ログイン成功時にプレフィックスでアルゴリズム判定し、旧形式なら新形式で再ハッシュして保存。argon2 への無停止移行を可能にする。
 - **実装場所:** `Auth` インターフェース裏に隔離
 
+### パスワードポリシー
+
+- **長さ:** 最小 8 文字・最大 128 文字
+- **複雑性要件:** なし（NIST SP 800-63B 準拠。総当たり耐性はレートリミット + PBKDF2 600,000 回反復で担保する）
+- **実装:** 共有 Zod スキーマ（`src/schemas/limits.ts` の `passwordSchema`）で一元定義し、S-01（初期セットアップ）・S-19（ユーザー作成・編集）・S-20（プロフィール・パスワード変更）・対応する全 API で同一検証を行う
+
 ### セッション管理
 
 セッションは D1/SQLite 上の `Session` テーブルで管理する（KV 依存を排除しポータビリティ維持）。Cookie には署名付きセッション ID のみを載せる。
+
+**有効期限（スペック D-14）:** 7 日固定（`604800000` ms）。スライディング延長は行わない（1回発行されたセッションは、途中の操作有無に関わらず7日で必ず失効する）。環境変数 `SESSION_TTL_MS` で変更可能（既定値は上記7日）。
 
 **Cookie 属性（必須）:**
 
@@ -47,8 +55,9 @@ HttpOnly; Secure; SameSite=Lax; Path=/
 ```
 
 **署名鍵:**
-- Secret 管理（CF Secret / オンプレは secret manager）
+- Secret 管理（CF Secret / オンプレは secret manager）。環境変数 `SESSION_SIGNING_KEYS`（JSON `{"<keyId>":"<secret>"}` 形式）で読み込む
 - 鍵 ID をプレフィックスに埋め込み、新鍵発行・旧鍵検証の猶予期間で無停止ローテーション
+- **運用規約:** 新規署名に使う鍵は環境変数 `SESSION_ACTIVE_KEY_ID` で明示指定する。`SESSION_SIGNING_KEYS` に鍵が1個しかない場合は省略可（その鍵が自動的に active になる）が、**複数鍵を設定する場合は `SESSION_ACTIVE_KEY_ID` の設定が必須**（未設定はどの鍵を新規署名に使うべきか曖昧なため起動時エラーとする）。鍵 ID に数字のみの文字列（例: `"1"`, `"2"`）は使用できない（JS のオブジェクトが整数様キーを宣言順ではなく数値昇順で列挙する仕様により、鍵ローテーション時に意図しない鍵が選ばれる footgun を防ぐため）
 
 **検証フロー（三段 AND）:**
 
@@ -65,9 +74,14 @@ HttpOnly; Secure; SameSite=Lax; Path=/
 
 ### CSRF 防御
 
+方式はスペック D-09: HttpOnly Cookie + サーバー埋込型 double-submit。
+
 - **一次防御:** `SameSite=Lax`
-- **二次防御:** 状態変更メソッド（POST / PATCH / DELETE）に double-submit CSRF トークンを必須とする
-- HTMX は `hx-headers` で CSRF トークンを全変更リクエストに自動付与
+- **二次防御:** 状態変更メソッド（POST / PATCH / DELETE / **PUT**）に double-submit CSRF トークンを必須とする（PUT は現状ルート未定義だが、将来の追加に備えた防御として実装済み）
+- セッション発行時に 32 バイトランダムの CSRF トークンを `HttpOnly; Secure; SameSite=Lax` Cookie で配布する
+- SSR が全フォームの hidden input と `<body hx-headers='{"X-CSRF-Token": ...}'>` に同一値を埋め込む。HTMX はこの `hx-headers` で CSRF トークンを全変更リクエストに自動付与する
+- ミドルウェアが上記4メソッドで Cookie 値と送信値の一致を検証する。不一致は 403 `FORBIDDEN`
+- Bearer トークン認証のリクエスト（衛星）は Cookie を使わないため CSRF 検証対象外
 - **不変条件:** GET は副作用なし（CSRF 対策不要を前提とする）
 
 ---
@@ -127,7 +141,9 @@ SELECT ... WHERE token_hash = ? AND revoked_at IS NULL
 ### 構造的保証
 
 1. `Organization` を第一級エンティティとし、`Project.organization_id` を必須 FK にする
-2. `Storage` インターフェースの全メソッドが `orgScope` を必須引数とする — 越境クエリをコンパイル時に防止
+2. `Storage` インターフェースの大多数のメソッドが `orgScope` を必須引数とする — 越境クエリをコンパイル時に防止。以下は意図的な例外（実装済み）:
+   - **認証解決系**（org がまだ判明していない時点で呼ばれる。以後の処理は必ず scope 付きメソッドを経由する）: `findUserForLogin`（ログイン時の email 検索）・`getUserById`（セッション→ユーザー解決。authn ミドルウェア専用、API ハンドラでの直接使用は禁止）
+   - **メンテナンス系**（project 横断・システム全体の運用操作であり、特定 org の業務データ操作ではないため。CF の scheduled Cron と、オンプレの `maintenance-cli` の両方から共通実装を呼ぶ）: `purgeObservations`（観測パージ）・`sweepExpiredSyncSessions`（失効セッション sweep）・`deleteExpiredUiSessions`（UI セッションパージ）・`purgeSyncWorkdata`（同期作業データパージ）・`countsSnapshot`（容量監視用の行数スナップショット）
 3. API トークンは project スコープ（→ org）。`:pid` の org 不一致は **403**
 4. MVP は単一 org を seed して運用するが、コードパスは常に org を通す
 
@@ -175,16 +191,13 @@ SELECT ... WHERE token_hash = ? AND revoked_at IS NULL
 
 `RateLimiter` は `Storage` / `Auth` に続く**第4のポータビリティ境界**として定義する。アプリ本体は `RateLimiter` インターフェースのみ参照する。
 
-| 環境 | 実装 |
-|---|---|
-| Cloudflare | Workers Rate Limiting binding（2025-09 GA） |
-| オンプレ | プロセス内カウンタ or Redis アダプタ |
+**実装済みの事実（D-14）:** ログイン・衛星トークンの両方とも、CF / オンプレを問わず**全環境でインメモリ実装**（プロセス内カウンタ、固定ウィンドウ）を使う。CF の Workers Rate Limiting binding は固定ウィンドウ（10秒/60秒）のみをサポートし、ログインに必要な15分ウィンドウを表現できないため採用していない。Redis 等の外部ストアアダプタも現時点では未実装。`RateLimiter` インターフェースはポータビリティ境界として将来の差し替え（例: 複数 isolate/プロセス間で状態を共有する必要が生じた場合の外部ストア化）に備えたものであり、MVP 時点の実装は単一のインメモリアダプタのみ。
 
-**位置づけ:** best-effort・eventually consistent。D1 にカウンタ行を置く方式は単一ライタ自己圧迫のため不採用。
+**位置づけ:** best-effort・eventually consistent（インメモリのためプロセス/isolate 再起動でカウンタがリセットされる。CF の Workers はisolateごとに独立したカウンタを持つ）。D1 にカウンタ行を置く方式は単一ライタ自己圧迫のため不採用。
 
 ### 衛星トークン向け流量制限
 
-トークン別に単位時間あたりのリクエスト数を制限する。fingerprint の暴走（observation insert 頻度の異常）も検知・ブロックし、D1 容量爆発を防ぐ。
+トークン別に**120 リクエスト / 分**（D-14）を上限とする。fingerprint の暴走（observation insert 頻度の異常）も間接的にこの制限で緩和され、D1 容量爆発を防ぐ。
 
 ### 認証ブルートフォース防御
 
@@ -192,10 +205,10 @@ SELECT ... WHERE token_hash = ? AND revoked_at IS NULL
 
 | 項目 | 仕様 |
 |---|---|
-| 単位 | `(account, IP)` 別の永続カウンタ |
-| ストア | D1 or CF Rate Limiting binding |
-| 対策 | ロックアウト + 指数バックオフ |
-| 記録 | 認証失敗イベントを認証監査に記録（TestCaseHistory とは隔離） |
+| 単位 | `(email, IP)` 別のカウンタ（上記「流量制御」と同じインメモリ `RateLimiter` 実装。永続ストアではない） |
+| 具体値（D-14） | **5 失敗 / 15 分 → 429**（固定ウィンドウ）。正しいパスワードでの試行はカウントに含めない（非対称消費） |
+| 対策 | 固定ウィンドウのみ。**指数バックオフは未実装**（ウィンドウ経過で即座にリセットされる） |
+| 記録（D-11） | 認証失敗イベントを構造化 JSON ログ（`console.warn`。`{"event":"auth_failure","email":...,"ip":...,"at":...}`）として出力する。D1 等への永続監査テーブルは持たない（TestCaseHistory とは完全に別のログ経路）。CF は Workers Logs / Logpush、オンプレは標準出力の収集基盤（例: journald・ログドライバ）で監査する運用を前提とする |
 
 ---
 
@@ -219,12 +232,12 @@ SELECT ... WHERE token_hash = ? AND revoked_at IS NULL
 
 | 不変条件 | 保証手段 |
 |---|---|
-| テナント越境不可 | Storage 全メソッド orgScope 必須・ミドルウェア前段検証 |
+| テナント越境不可 | Storage の業務データ操作メソッドは orgScope 必須（意図的な例外は「構造的保証」参照）・ミドルウェア前段検証 |
 | IDOR 不可 | パス階層化 + id → org 解決 + 不一致 404 |
 | セッション固定不可 | ログイン成功時にセッション ID 再発行 |
 | 失効トークン素通り不可 | 認証述語に失効チェック内包 |
 | トークン平文漏洩不可 | SHA-256 ハッシュのみ保存・ログ/履歴/エラーに含めない |
 | CSRF 不可 | SameSite=Lax + double-submit token（状態変更メソッド） |
-| パスワード総当たり不可 | `(account, IP)` 別ロックアウト + 指数バックオフ |
+| パスワード総当たり不可 | `(email, IP)` 別レートリミット（固定ウィンドウ 5失敗/15分 → 429。D-14） |
 | History 改竄不可 | TestCaseHistory は追記専用（UPDATE/DELETE 禁止） |
 | viewer 越権不可 | ルートメタデータ駆動 RBAC をミドルウェアが機械執行 |

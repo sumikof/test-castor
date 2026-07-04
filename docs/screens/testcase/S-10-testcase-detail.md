@@ -61,11 +61,12 @@
 | ステータスドロップダウン | ドロップダウン | `select-status` | editor+: 操作可能 / viewer: 読み取り専用表示 | draft / approved / archived |
 | 所有権表示 | テキスト+アイコン | `display-ownership` | 常時 | `machine` または `human` + アイコン |
 | drift バッジ | バッジ | `badge-drift` | `drift=true` のときのみ表示 | ⚡ アイコン付き |
-| drift 解消ボタン | ボタン | `btn-accept-fingerprint` | `drift=true` かつ editor+ | accept-fingerprint API を実行 |
 | stale バッジ | バッジ | `badge-stale` | `is_stale=true` のときのみ表示 | 🔺 アイコン + stale origin 名 |
 | 編集ボタン | ボタン | `btn-edit` | editor+ かつ `status != archived` | S-11 編集モードに切替 |
 | アーカイブボタン | ボタン | `btn-archive` | editor+ かつ `status != archived` | archived に変更 |
 | 復帰ボタン | ボタン | `btn-restore` | editor+ かつ `status == archived` | draft に復帰 |
+
+drift 解消ボタン（`btn-accept-fingerprint`）はヘッダー領域には配置しない。構造化 Diff タブ（S-12）内にのみ配置する（ヘッダーとタブ内の両方に置くと、同一 `data-testid` が1画面に重複し E2E テストで危険なため）。詳細は [S-12「アクション」](./S-12-structured-diff.md)を参照。
 
 ### ステータスドロップダウンの遷移制約
 
@@ -85,11 +86,11 @@
 
 | 要素名 | 種別 | data-testid | 条件付き表示 | 備考 |
 |---|---|---|---|---|
-| 基本情報タブ | タブ | `tab-basic` | 常時 | デフォルトアクティブ |
+| 基本情報タブ | タブ | `tab-basic-info` | 常時 | デフォルトアクティブ |
 | Gherkin タブ | タブ | `tab-gherkin` | 常時 | S-13 Gherkin ビュー |
-| 構造化 Diff タブ | タブ | `tab-diff` | 常時（drift 時にドットインジケータ付き） | S-12 構造化 Diff。drift 時に `●` 表示 |
+| 構造化 Diff タブ | タブ | `tab-diff` | 常時クリック可能（drift 時にドットインジケータ付き。スペック D-13-4） | S-12 構造化 Diff。drift 時に `●` 表示 |
 | 変更履歴タブ | タブ | `tab-history` | 常時 | S-14 変更履歴 |
-| Identity 情報タブ | タブ | `tab-identity` | 常時 | per-origin の同定情報 |
+| Identity 情報タブ | タブ | `tab-identities` | 常時 | per-origin の同定情報 |
 
 ### 基本情報タブ（デフォルト）
 
@@ -184,7 +185,7 @@
 | 認証切れ | 401 | `UNAUTHORIZED` | ログイン画面にリダイレクト |
 | OCC 競合（ステータス変更時） | 409 | `OCC_CONFLICT` | トースト「更新が競合しました。最新の内容を確認してください」+ 再読み込みボタン |
 | If-Match 未指定 | 428 | `PRECONDITION_REQUIRED` | クライアントバグ（ユーザーには表示されない想定） |
-| drift 未発生で accept-fingerprint | 422 | `NO_DRIFT` | トースト「乖離が発生していません」 |
+| drift 未発生で accept-fingerprint | 422 | `NO_DRIFT` | トースト「このテストケースには drift が発生していません。」（S-12 と共通の文言） |
 
 ---
 

@@ -24,10 +24,10 @@
 │ [基本情報] [Gherkin] [構造化Diff] [変更履歴 ●]           │
 │ ─────────────────────────────────────────────────────    │
 │                                                          │
-│ 2026-06-28 14:30  田中 (editor)  ステータス変更          │
+│ 2026-06-28 14:30  田中太郎  ステータス変更                │
 │   status: draft → approved                               │
 │                                                          │
-│ 2026-06-28 14:25  田中 (editor)  更新                    │
+│ 2026-06-28 14:25  田中太郎  更新                          │
 │   then: "エラーが返る"                                   │
 │       → "エラーコード CARD_EXPIRED が返る"               │
 │   category: normal → abnormal                            │
@@ -85,6 +85,8 @@
 |---|---|---|
 | `user:<uuid>` | ユーザー表示名 + ロールバッジ | `田中太郎 (editor)` |
 | `token:<uuid>` | `token:` + トークン名 | `token:discovery-ci` |
+
+**実装済みの制約:** `GET /testcases/:id/history` の `actor_display`（D-04）は表示名のみを解決し、ロール情報を含まない（`listHistory` が `users.display_name` を JOIN するのみで、role 列までは結合しないデータ制約。MVP として受容）。そのため本実装は user actor を**表示名のみ**（例: `田中太郎`）で表示し、ロールバッジは付与しない。
 
 ### ページング
 

@@ -5,7 +5,7 @@
 | ID | S-18 |
 | 画面名 | ユーザー管理 |
 | 種別 | ページ |
-| URL | `/users` |
+| URL | `/admin/users` |
 | 対応 UC | UC-05, UC-25 |
 | 必要ロール | admin |
 | スペック | API定義済み |

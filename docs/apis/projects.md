@@ -41,6 +41,7 @@
 | id | string (UUID) | プロジェクトID |
 | name | string | プロジェクト名 |
 | repo_url | string / null | 連携元リポジトリURL |
+| testcase_count | integer | 非archivedテストケース件数（スペック D-05） |
 | created_at | integer (epoch ms) | 作成日時 |
 | updated_at | integer (epoch ms) | 更新日時 |
 
@@ -53,6 +54,7 @@
       "id": "uuid",
       "name": "payment-service",
       "repo_url": "https://github.com/example/payment",
+      "testcase_count": 42,
       "created_at": 1719388800000,
       "updated_at": 1719388800000
     }
@@ -152,7 +154,7 @@ PATCHセマンティクス（キー未指定=不変、明示的null=クリア）
 
 **200 OK**
 
-更新後のプロジェクト情報（GET /api/v1/projects のアイテムと同一構造）。
+更新後のプロジェクト情報。フィールドは POST /api/v1/projects のレスポンスと同一構造（`id` / `name` / `repo_url` / `created_at` / `updated_at`）で、**`testcase_count` は含まない**（D-05: `testcase_count` は `GET /api/v1/projects` の一覧応答のみが返す追加フィールドで、POST/PATCH の単体レスポンスには含めない）。
 
 ### レスポンス例
 

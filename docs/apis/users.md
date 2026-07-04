@@ -44,6 +44,7 @@
 | email | string | メールアドレス |
 | display_name | string | 表示名 |
 | role | string | `admin` / `editor` / `viewer` |
+| last_login_at | integer (epoch ms) / null | 最終ログイン成功時刻。未ログインなら `null`（スペック D-05） |
 | created_at | integer (epoch ms) | 作成日時 |
 | updated_at | integer (epoch ms) | 更新日時 |
 
@@ -57,6 +58,7 @@
       "email": "tanaka@example.com",
       "display_name": "田中太郎",
       "role": "admin",
+      "last_login_at": 1719395600000,
       "created_at": 1719388800000,
       "updated_at": 1719388800000
     }
@@ -106,6 +108,7 @@
 | email | string | メールアドレス |
 | display_name | string | 表示名 |
 | role | string | 割り当てられたロール |
+| last_login_at | integer (epoch ms) / null | 最終ログイン成功時刻。作成直後は必ず `null`（スペック D-05） |
 | created_at | integer (epoch ms) | 作成日時 |
 | updated_at | integer (epoch ms) | 更新日時 |
 
@@ -117,6 +120,7 @@
   "email": "sato@example.com",
   "display_name": "佐藤花子",
   "role": "editor",
+  "last_login_at": null,
   "created_at": 1719388800000,
   "updated_at": 1719388800000
 }
@@ -160,6 +164,7 @@
 | email | string | メールアドレス |
 | display_name | string | 表示名 |
 | role | string | `admin` / `editor` / `viewer` |
+| last_login_at | integer (epoch ms) / null | 最終ログイン成功時刻。未ログインなら `null`（スペック D-05） |
 | created_at | integer (epoch ms) | 作成日時 |
 | updated_at | integer (epoch ms) | 更新日時 |
 
@@ -171,6 +176,7 @@
   "email": "sato@example.com",
   "display_name": "佐藤花子",
   "role": "editor",
+  "last_login_at": 1719395600000,
   "created_at": 1719388800000,
   "updated_at": 1719388800000
 }
@@ -232,10 +238,18 @@ PATCHセマンティクス（キー未指定=不変、明示的null=クリア）
   "email": "sato@example.com",
   "display_name": "佐藤花子（リーダー）",
   "role": "admin",
+  "last_login_at": 1719395600000,
   "created_at": 1719388800000,
   "updated_at": 1719392400000
 }
 ```
+
+### エラー
+
+| エラーコード | HTTP | 条件 |
+|---|---|---|
+| `NOT_FOUND` | 404 | 指定IDのユーザーが存在しない、またはテナント境界違反 |
+| `VALIDATION_FAILED` | 422 | 「最後の admin」保護（組織内の admin が 0 人になる role 変更は拒否する。自己降格・他者降格を区別しない） |
 
 ### 副作用・業務ルール
 
