@@ -116,4 +116,60 @@ describe('統合: entry(src/entry/workers.ts の実配線)', () => {
       errorSpy.mockRestore();
     }
   });
+
+  // レビュー finding(re-review round2)「catch scope swallows genuine maintenance failures」:
+  // runScheduledMaintenance の try は現状 await runMaintenance(depsFrom(env)) 全体を包んでいるため、
+  // bootstrap(depsFrom)成功後に発生する genuine な実行時失敗(D1エラー等。maintenance の各ステップ
+  // 自体は内部でtry/catchしない)まで bootstrap 失敗と同じ catch に飲み込まれ、
+  // scheduled_maintenance_bootstrap_failed という誤ったイベント名でログされたうえ、ctx.waitUntil に
+  // 渡した Promise が reject せず解決してしまう(= プラットフォームのエラー監視/cron再試行へ伝わる
+  // はずの reject シグナルを握りつぶす)。修正後は depsFrom(env) だけを狭い try/catch で囲み、
+  // runMaintenance(deps) 自体はその外側で(ガードなしで)呼ぶ。
+  //
+  // poisonedD1 は D1Database のうち adapter(src/storage/adapters/d1.ts→drizzle-orm)が最初に
+  // 触るメソッド(prepare/batch/exec)を全て意図的に投げるようにしたスタブ。drizzle(d1) の構築自体
+  // (createD1Storage→depsFrom)はクエリを一切発行しない(node_modules/drizzle-orm/d1/driver.js
+  // 参照。client を保持するだけ)ため bootstrap は成功し、runMaintenance 内の最初のクエリ
+  // (purgeObservationsUntilDone→storage.purgeObservations→driver.batch→db.batch→session.batch→
+  // client.prepare)で初めて失敗する。
+  //
+  // 実装注記: このテストは意図的に createExecutionContext()/waitOnExecutionContext() を使わない。
+  // 実際に試したところ(このプールのこのバージョン。dist/worker/lib/cloudflare/test-runner.mjsの
+  // updateStackedStorage/waitForGlobalWaitUntil、test-internal.mjsのregisterGlobalWaitUntil)、
+  // 実 ExecutionContext.waitUntil() はローカルの追跡配列に加えてプール内部のモジュールグローバルな
+  // 追跡配列にも同じ Promise を登録し、isolatedStorage の push/pop 境界(onBeforeTryTask/
+  // onAfterTryTask)毎にそのグローバル配列を drain して reject を re-throw する。
+  // waitOnExecutionContext(ctx) はローカル配列しか drain しないため、reject する Promise をそこで
+  // 使うと「アサーション自体は通ったのに直後の after-hook 境界で同じ reject が再度観測されテストが
+  // 二重に失敗する」(プール固有の挙動。素の createExecutionContext() + reject する waitUntil +
+  // waitOnExecutionContext での局所catchだけを使った使い捨て実験で実際に再現・確認した)。
+  // ctx.waitUntil(p) を呼ぶだけの最小限のフェイクオブジェクトに差し替えることでこのプール固有の
+  // グローバル二重登録を回避しつつ、「scheduled が ctx.waitUntil に渡す Promise が reject する」
+  // という finding の本質は実 workersEntry.scheduled 経由でそのまま検証する。
+  it('scheduled: bootstrap成功後の実行時エラー(D1障害)はbootstrap失敗として握りつぶさずwaitUntilへ伝播する', async () => {
+    const poisonedD1 = {
+      prepare(): never { throw new Error('simulated d1 outage'); },
+      batch(): never { throw new Error('simulated d1 outage'); },
+      exec(): never { throw new Error('simulated d1 outage'); },
+    } as unknown as D1Database;
+    const poisonedEnv = { ...env, DB: poisonedD1 };
+    const controller = createScheduledController();
+    let captured: Promise<unknown> | undefined;
+    const fakeCtx = { waitUntil(p: Promise<unknown>) { captured = p; } } as unknown as ExecutionContext;
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      workersEntry.scheduled(controller, poisonedEnv as any, fakeCtx);
+      expect(captured).toBeDefined();
+      await expect(captured!).rejects.toThrow('simulated d1 outage');
+
+      // bootstrap(depsFrom)自体は成功しているはずなので、bootstrap失敗の構造化ログ(誤ラベル)は
+      // 出ない(=実行時失敗をbootstrap失敗として握りつぶす旧挙動に戻っていないことの確認)。
+      const parsedCalls = errorSpy.mock.calls
+        .map((args) => { try { return JSON.parse(String(args[0])); } catch { return undefined; } });
+      expect(parsedCalls.some((p) => p?.event === 'scheduled_maintenance_bootstrap_failed')).toBe(false);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
 });

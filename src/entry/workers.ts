@@ -79,23 +79,33 @@ function depsFrom(env: Env): MaintenanceDeps {
 }
 
 /**
- * scheduled 本体。depsFrom(env)(config 読み込み含む)を try/catch で包み、config bootstrap 失敗
- * (不正な SESSION_SIGNING_KEYS 等、src/http/config.ts が同期的に throw する分岐)が ctx.waitUntil の
+ * scheduled 本体。depsFrom(env)(config 読み込み含む)だけを狭い try/catch で包み、config bootstrap
+ * 失敗(不正な SESSION_SIGNING_KEYS 等、src/http/config.ts が同期的に throw する分岐)が ctx.waitUntil の
  * 外へ素の同期例外として漏れないようにする(レビュー finding #1)。GC-4 自体は fetch のエラー応答
  * スキーマの話で scheduled には直接適用されないが、「ハンドラから未捕捉例外を漏らさない」という
  * 同じ趣旨で保護する。失敗時は runMaintenance と同じ {"event":...} 構造化ログ流儀で1行出し、
  * この回のメンテナンスはスキップする(同じ設定不備はどのみち全 HTTP トラフィックを壊すため、
  * cron 側は二次的な保険で十分 — buildDeps/getApp/depsFrom 自体の構造は変えない最小限の変更)。
+ *
+ * re-review round2 finding「catch scope swallows genuine maintenance failures」: 上記の try は
+ * bootstrap(depsFrom)のみを対象とし、await runMaintenance(deps) はその外側で(ガードなしで)呼ぶ。
+ * maintenance の各ステップ(purge/sweep等)は内部で try/catch しないため、bootstrap成功後の
+ * genuine な実行時失敗(D1エラー等)は bootstrap 失敗と区別され、scheduled_maintenance_bootstrap_failed
+ * として誤ってログ・握りつぶされることなく、素のまま reject して ctx.waitUntil に伝播する
+ * (= プラットフォームのエラー監視/cron再試行がこれまで通り機能する)。
  */
 async function runScheduledMaintenance(env: Env): Promise<void> {
+  let deps: MaintenanceDeps;
   try {
-    await runMaintenance(depsFrom(env));
+    deps = depsFrom(env);
   } catch (err) {
     console.error(JSON.stringify({
       event: 'scheduled_maintenance_bootstrap_failed',
       error: err instanceof Error ? err.message : String(err),
     }));
+    return;
   }
+  await runMaintenance(deps);
 }
 
 export default {
