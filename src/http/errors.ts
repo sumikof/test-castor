@@ -19,3 +19,28 @@ export class AppError extends Error {
     this.retryable = retryable;
   }
 }
+
+/** GC-4 統一エラースキーマの応答本体。 */
+export interface ErrorResponseBody {
+  error: { code: ErrorCode; message: string; details?: unknown; retryable: boolean };
+}
+
+/**
+ * 任意の例外を GC-4 統一エラースキーマの `{ status, body }` へ変換する、フレームワーク非依存の
+ * 唯一の変換ロジック。http/middleware/error.ts の errorMiddleware(Hono onError)と
+ * src/entry/workers.ts(Hono の app.fetch() より前 — config bootstrap 失敗時)の両方がここを呼ぶ
+ * (レビュー finding #1: 変換ロジックを2箇所で手書きして食い違わせない。手書きし直すと片方だけ
+ * スキーマがずれる/鍵材料等の詳細を漏らす、といった不整合の温床になるため一本化する)。
+ * AppError 以外は固定文言のみ返す(実メッセージ・スタックはレスポンスに含めず、サーバ側ログにのみ
+ * 構造化 JSON で出す — D-11 の精神)。
+ */
+export function toErrorResponsePayload(err: unknown): { status: number; body: ErrorResponseBody } {
+  if (err instanceof AppError) {
+    return {
+      status: err.status,
+      body: { error: { code: err.code, message: err.message, details: err.details ?? undefined, retryable: err.retryable } },
+    };
+  }
+  console.error(JSON.stringify({ level: 'error', msg: String(err), stack: (err as Error)?.stack }));
+  return { status: 500, body: { error: { code: 'INTERNAL', message: 'internal error', retryable: true } } };
+}

@@ -7,5 +7,6 @@ declare module 'cloudflare:test' {
     ASSETS: Fetcher;
     SESSION_TTL_MS: string;
     SESSION_SIGNING_KEYS?: string;
+    SESSION_ACTIVE_KEY_ID?: string;
   }
 }

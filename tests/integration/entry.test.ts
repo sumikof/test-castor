@@ -7,7 +7,7 @@
 // scheduled ハンドラは SELF では呼べない(Fetcher は fetch のみ)ため、モジュールを直接 import して
 // createExecutionContext/createScheduledController/waitOnExecutionContext(cloudflare:test 標準ヘルパ)
 // で駆動する。
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { env, SELF, createExecutionContext, waitOnExecutionContext, createScheduledController } from 'cloudflare:test';
 import workersEntry from '../../src/entry/workers';
 
@@ -75,5 +75,45 @@ describe('統合: entry(src/entry/workers.ts の実配線)', () => {
 
     const remaining = await env.DB.prepare('SELECT id FROM sessions WHERE id = ?').bind('sess-entry-expired').first();
     expect(remaining).toBeNull();
+  });
+
+  // レビュー finding #1(GC-4 bypass on config-bootstrap failure): getApp(env)→buildDeps(env)→
+  // loadConfig/loadSigningKeys は Hono の app.fetch() より前に同期的に throw しうる(不正な
+  // SESSION_SIGNING_KEYS 等)。これは errorMiddleware(app.onError)より前で起きるため、直さないと
+  // 生の例外が isolate の外へ漏れ、GC-4(統一エラースキーマ以外を返さない)を破る。
+  // ポイズン値には「malformed JSON」を使う: absent/undefined は warn+dev フォールバックの
+  // 非throw分岐に落ちるため、ポイズンとして不適(brief注記のとおり)。
+  it('fetch: config bootstrap失敗(不正なSESSION_SIGNING_KEYS)時もGC-4統一エラースキーマ(500 INTERNAL/retryable)を返し、鍵材料を漏らさない', async () => {
+    const poisonedEnv = { ...env, SESSION_SIGNING_KEYS: 'not-valid-json' };
+    const ctx = createExecutionContext();
+    const res = await workersEntry.fetch(new Request('https://example.com/'), poisonedEnv as any, ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(res.status).toBe(500);
+    const body = await res.json<any>();
+    expect(body.error.code).toBe('INTERNAL');
+    expect(body.error.retryable).toBe(true);
+    expect(JSON.stringify(body)).not.toContain('not-valid-json');
+  });
+
+  it('scheduled: config bootstrap失敗時も例外を漏らさずに完了する(構造化ログを出し、この回のメンテナンスはスキップ)', async () => {
+    const poisonedEnv = { ...env, SESSION_SIGNING_KEYS: 'not-valid-json' };
+    const ctx = createExecutionContext();
+    const controller = createScheduledController();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(() => workersEntry.scheduled(controller, poisonedEnv as any, ctx)).not.toThrow();
+      await waitOnExecutionContext(ctx);
+
+      // 構造化 {"event":...} ログ(runMaintenance と同じ流儀)が出ることを確認する。
+      // サーバ側ログは D-11 の精神どおり詳細(err.message)を含めてよい — 漏らしてはいけないのは
+      // fetch のレスポンス本文(上のテストで検証済み)であって、サーバ内部ログではない。
+      expect(errorSpy).toHaveBeenCalled();
+      const parsedCalls = errorSpy.mock.calls
+        .map((args) => { try { return JSON.parse(String(args[0])); } catch { return undefined; } });
+      expect(parsedCalls.some((p) => p?.event === 'scheduled_maintenance_bootstrap_failed')).toBe(true);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });

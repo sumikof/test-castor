@@ -1,20 +1,14 @@
 // src/http/middleware/error.ts
-// 統一エラースキーマ(GC-4, api-reference.md「統一エラースキーマ」)を構築する唯一の場所。
-// app.onError(errorMiddleware) として登録する(src/http/app.ts)。
+// 統一エラースキーマ(GC-4, api-reference.md「統一エラースキーマ」)を app.onError(errorMiddleware)
+// として登録する(src/http/app.ts)。実際の例外→スキーマ変換ロジックは src/http/errors.ts の
+// toErrorResponsePayload に一本化されている(src/entry/workers.ts の config bootstrap 失敗ガードも
+// 同じ関数を再利用する。レビュー finding #1: 変換ロジックの二重実装を避ける)。
 import type { Context } from 'hono';
-import { AppError } from '../errors';
+import { AppError, toErrorResponsePayload } from '../errors';
 
 export function errorMiddleware(err: unknown, c: Context) {
-  if (err instanceof AppError) {
-    return c.json(
-      { error: { code: err.code, message: err.message, details: err.details ?? undefined, retryable: err.retryable } },
-      err.status as any,
-    );
-  }
-  // 予期しない例外: レスポンスは固定文言のみ(実メッセージ・スタックは漏らさない)。
-  // 詳細はサーバ側ログにのみ構造化 JSON で出す(D-11 の精神。認証失敗監査そのものではないが同じ方針)。
-  console.error(JSON.stringify({ level: 'error', msg: String(err), stack: (err as Error)?.stack }));
-  return c.json({ error: { code: 'INTERNAL', message: 'internal error', retryable: true } }, 500);
+  const { status, body } = toErrorResponsePayload(err);
+  return c.json(body, status as any);
 }
 
 /** zValidator(各ルートの入力検証)の失敗を AppError('VALIDATION_FAILED', 422, ...) へ変換する共通 hook。 */

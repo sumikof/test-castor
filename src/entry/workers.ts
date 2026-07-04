@@ -14,6 +14,7 @@
 import { Hono } from 'hono';
 import { createApp, type AppDeps, type AppEnv } from '../http/app';
 import { loadConfig } from '../http/config';
+import { toErrorResponsePayload } from '../http/errors';
 import { createD1Storage } from '../storage/adapters/d1';
 import { createWebcryptoAuth } from '../auth/webcrypto-auth';
 import { createMemoryRateLimiter } from '../ratelimit/memory';
@@ -77,11 +78,42 @@ function depsFrom(env: Env): MaintenanceDeps {
   return { storage: deps.storage, now: deps.now, retentionMs: deps.config.observationRetentionMs };
 }
 
+/**
+ * scheduled 本体。depsFrom(env)(config 読み込み含む)を try/catch で包み、config bootstrap 失敗
+ * (不正な SESSION_SIGNING_KEYS 等、src/http/config.ts が同期的に throw する分岐)が ctx.waitUntil の
+ * 外へ素の同期例外として漏れないようにする(レビュー finding #1)。GC-4 自体は fetch のエラー応答
+ * スキーマの話で scheduled には直接適用されないが、「ハンドラから未捕捉例外を漏らさない」という
+ * 同じ趣旨で保護する。失敗時は runMaintenance と同じ {"event":...} 構造化ログ流儀で1行出し、
+ * この回のメンテナンスはスキップする(同じ設定不備はどのみち全 HTTP トラフィックを壊すため、
+ * cron 側は二次的な保険で十分 — buildDeps/getApp/depsFrom 自体の構造は変えない最小限の変更)。
+ */
+async function runScheduledMaintenance(env: Env): Promise<void> {
+  try {
+    await runMaintenance(depsFrom(env));
+  } catch (err) {
+    console.error(JSON.stringify({
+      event: 'scheduled_maintenance_bootstrap_failed',
+      error: err instanceof Error ? err.message : String(err),
+    }));
+  }
+}
+
 export default {
   fetch(req: Request, env: Env, ctx: ExecutionContext) {
-    return getApp(env).fetch(req, env, ctx);
+    try {
+      return getApp(env).fetch(req, env, ctx);
+    } catch (err) {
+      // GC-4: Hono の onError(errorMiddleware)は app.fetch() 呼び出しが始まった後にしか効かない。
+      // getApp(env)→buildDeps(env)(config 読み込み含む)がここに来る前に同期的に throw すると、
+      // errorMiddleware を経由せず生の例外が isolate の外へ漏れ、統一エラースキーマ以外を返さない
+      // という GC-4 の保証を破る(レビュー finding #1)。errorMiddleware と同じ変換ロジック
+      // (toErrorResponsePayload, src/http/errors.ts)を再利用することで、鍵材料等の設定詳細を
+      // message に含めない・スキーマを二重実装しない、の両方を保証する。
+      const { status, body } = toErrorResponsePayload(err);
+      return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+    }
   },
   scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(runMaintenance(depsFrom(env)));
+    ctx.waitUntil(runScheduledMaintenance(env));
   },
 } satisfies ExportedHandler<Env>;
