@@ -411,4 +411,49 @@ export interface Storage {
    * unreviewed(status=draft AND ownership=machine)/drift(drift=true)/stale(is_stale=true)件数。
    */
   syncStatus(scope: OrgScope, pid: string): Promise<SyncStatusResult>;
+
+  // --- maintenance(task-22-brief.md。CF scheduled と node CLI(Task 23)の双方から src/maintenance/
+  // 経由で呼ばれる低レベルプリミティブ)---
+  //
+  // GC-5 との関係(タスク報告に明記する既知の緊張): GC-5は「Storage の全メソッドは第一引数に
+  // orgScope」と定めるが、以下5メソッドはブリーフが明示するとおり orgScope を取らない。
+  // これらはプロジェクト横断・システム全体のメンテナンス操作(観測パージ・失効 sweep・行数監視)であり、
+  // 特定 org の業務データ操作ではないため、ブリーフの明示シグネチャをそのまま実装する
+  // (per-org スコープをここで独自に発明しない)。
+
+  /**
+   * committed観測の期間パージ(operations.md §4.1「パージの削除述語」)。1回の呼び出しで
+   * `rowid IN (SELECT rowid FROM ... LIMIT :batchLimit)` の1文のみを実行し、実際に削除した行数を
+   * 返す(syncCommitWindow の windowLimit と同じ「1回の呼び出し=1バッチ」設計。閾値未満になるまで
+   * 繰り返し呼ぶのは呼び出し側 = src/maintenance/purge.ts の責務)。
+   *
+   * 述語(committed セッション由来のみ・retention 超・per-(test_case_id,origin) 最低1件保持の
+   * ROW_NUMBER)は operations.md の SQL 例をそのまま実装するが、素の `DELETE...LIMIT` は使わず
+   * notes.md 実装標準の rowid サブクエリパターンに翻訳する(libSQL 互換性のため。タスク報告参照)。
+   */
+  purgeObservations(p: { now: number; retentionMs: number; batchLimit: number }): Promise<number>;
+  /**
+   * 失効した SyncSession を expired に倒す(sync-protocol.md「失効の執行モデル」のセカンダリ = Cron
+   * sweep。正しさは各エンドポイントの遅延評価(syncExpireLapsed 等)が担保する)。全プロジェクト対象
+   * (project 単位の遅延評価は既存の syncExpireLapsed が担う)。LIMIT なしの単一 UPDATE(対象は「現在
+   * active な期限切れセッション」のみで長期的に蓄積しないため、複数バッチに分ける必要がない)。
+   */
+  sweepExpiredSyncSessions(now: number): Promise<number>;
+  /** 期限切れ UI セッション(`sessions` テーブル)を limit 件まで削除する。purgeObservations と同じく
+   * 1回の呼び出し=1バッチ(rowid IN (SELECT rowid ... LIMIT :limit))。反復は呼び出し側の責務。 */
+  deleteExpiredUiSessions(now: number, limit: number): Promise<number>;
+  /**
+   * committed/expired セッションの sync_staging + sync_seen(セッション寿命のみの作業データ。
+   * schema.ts の設計ノートどおり確定/失効後にパージ対象)を削除し、2テーブル合計の削除行数を返す。
+   * ブリーフのシグネチャは引数を取らない(now/batchLimit を露出しない)ため、内部バッチ幅は固定定数
+   * (drizzle-storage.ts 参照)。1回の呼び出しで各テーブル最大 定数件・計2文のみ実行し、反復は
+   * 呼び出し側(src/maintenance/purge.ts)の責務とする(他の3メソッドと対称的な設計)。
+   */
+  purgeSyncWorkdata(): Promise<number>;
+  /**
+   * 主要テーブルの行数スナップショット(概算容量監視ログ用。operations.md §4.2「監視」)。
+   * data-model.md のエンティティ関係図が定義する11エンティティのみを対象にする(sync_seen は
+   * data-model.md/sync-protocol.md 未記載の内部実装専用テーブルのため対象外。schema.ts 参照)。
+   */
+  countsSnapshot(): Promise<Record<string, number>>;
 }

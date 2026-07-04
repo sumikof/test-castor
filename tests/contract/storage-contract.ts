@@ -1174,5 +1174,120 @@ export function runStorageContract(name: string, factory: () => Promise<Contract
         expect(xAfter?.fingerprint).toBe('fp-a-1'); // origin B の fp-b-1 に汚染されていない
       },
     );
+
+    // --- maintenance(task-22-brief.md)。ここでの主眼は3アダプタ横断のSQL互換性(特にlibSQLの
+    // rowid IN (SELECT rowid ... LIMIT) パターン)の実証。不変条件の網羅的検証は
+    // tests/unit/maintenance.test.ts(better-sqlite3, 高速)側で行う。 ---
+
+    describe('maintenance', () => {
+      const DAY_MS = 24 * 60 * 60 * 1000;
+      const RETENTION_MS = 90 * DAY_MS;
+
+      it(
+        'purgeObservations: committedかつretention超のみ削除し、各(test_case,origin)の直近1件は残し、' +
+          'batchLimitを尊重する(素のDELETE...LIMITではなくrowidサブクエリパターンで実装 — libSQL互換性の要)',
+        async () => {
+          const p = await ctx.storage.createProject(scope, { name: 'proj-maint-purge' }, now);
+          const oldTs = now - RETENTION_MS - DAY_MS; // 91日前
+
+          const started = await ctx.storage.syncStart(
+            scope, p.id, { token: 'tok-maint-a', origin: 'discovery-v1', now: oldTs, slidingMs: 365 * DAY_MS },
+          );
+          if (started.kind !== 'created') throw new Error('unreachable');
+          await ctx.storage.syncAppendObservations(
+            scope, p.id, started.session, [chunkObs({ externalRef: 'ext-maint-a', fingerprint: 'fp-maint-old' })], oldTs,
+          );
+          await ctx.storage.syncAppendObservations(
+            scope, p.id, started.session, [chunkObs({ externalRef: 'ext-maint-a', fingerprint: 'fp-maint-latest' })], oldTs + 500,
+          );
+          await runCommitToConvergence(ctx.storage, scope, p.id, 'tok-maint-a', commitParams({ now: oldTs + 600 }));
+          await ctx.storage.syncFinalize(scope, p.id, 'tok-maint-a', oldTs + 700);
+
+          // active由来(未commit)。古いが committed フィルタで除外されるはず
+          const startedActive = await ctx.storage.syncStart(
+            scope, p.id, { token: 'tok-maint-active', origin: 'discovery-v1', now: oldTs, slidingMs: 365 * DAY_MS },
+          );
+          if (startedActive.kind !== 'created') throw new Error('unreachable');
+          await ctx.storage.syncAppendObservations(
+            scope, p.id, startedActive.session, [chunkObs({ externalRef: 'ext-maint-active', fingerprint: 'fp-maint-active' })], oldTs,
+          );
+
+          // batchLimit=1: 1回の呼び出しは1件のみ削除(LIMIT句が効いている証拠)
+          expect(await ctx.storage.purgeObservations({ now, retentionMs: RETENTION_MS, batchLimit: 1 })).toBe(1);
+          // 2回目: 残る削除対象は無い(survivorとactive由来だけが残っているため0。activeも消えていないことの間接証拠)
+          expect(await ctx.storage.purgeObservations({ now, retentionMs: RETENTION_MS, batchLimit: 1 })).toBe(0);
+
+          const tcId = (await ctx.storage.syncMappings(scope, p.id, 'tok-maint-a'))
+            .find((m) => m.externalRef === 'ext-maint-a')!.testCaseId;
+          const remaining = await ctx.storage.listObservations(scope, p.id, tcId, { limit: 50 });
+          expect(remaining.items.map((o) => o.fingerprint)).toEqual(['fp-maint-latest']); // survivorのみ残る
+        },
+      );
+
+      it('sweepExpiredSyncSessions: 全プロジェクト横断でactiveかつ期限切れのみexpiredに倒す', async () => {
+        const p1 = await ctx.storage.createProject(scope, { name: 'proj-maint-sweep-1' }, now);
+        const p2 = await ctx.storage.createProject(scope, { name: 'proj-maint-sweep-2' }, now);
+        await ctx.storage.syncStart(scope, p1.id, { token: 'tok-maint-sweep-1', origin: 'discovery-v1', now: now - 10_000, slidingMs: 1000 });
+        await ctx.storage.syncStart(scope, p2.id, { token: 'tok-maint-sweep-2', origin: 'discovery-v1', now, slidingMs: 365 * DAY_MS });
+
+        expect(await ctx.storage.sweepExpiredSyncSessions(now)).toBe(1);
+        expect((await ctx.storage.syncGetSession(scope, p1.id, 'tok-maint-sweep-1'))?.status).toBe('expired');
+        expect((await ctx.storage.syncGetSession(scope, p2.id, 'tok-maint-sweep-2'))?.status).toBe('active');
+      });
+
+      it('deleteExpiredUiSessions: 期限切れUIセッションをlimit件まで削除し、期限内は残す', async () => {
+        const admin = await ctx.storage.findUserForLogin('admin@example.com');
+        await ctx.storage.createSession({ id: 'sess-maint-1', userId: admin!.id, expiresAt: now - 1000, createdAt: now - 100_000 });
+        await ctx.storage.createSession({ id: 'sess-maint-2', userId: admin!.id, expiresAt: now - 2000, createdAt: now - 100_000 });
+        await ctx.storage.createSession({ id: 'sess-maint-live', userId: admin!.id, expiresAt: now + 100_000, createdAt: now - 100_000 });
+
+        expect(await ctx.storage.deleteExpiredUiSessions(now, 1)).toBe(1); // limitを尊重
+        expect(await ctx.storage.deleteExpiredUiSessions(now, 10)).toBe(1); // 残り1件
+        expect(await ctx.storage.getSession('sess-maint-live')).not.toBeNull();
+      });
+
+      it('purgeSyncWorkdata: committedセッションのsync_stagingを削除し、activeセッションのものは残す(countsSnapshotで検証)', async () => {
+        const p = await ctx.storage.createProject(scope, { name: 'proj-maint-workdata' }, now);
+
+        // committed: sync_staging が1行 → purge対象
+        const startedCommitted = await ctx.storage.syncStart(
+          scope, p.id, { token: 'tok-maint-wd-c', origin: 'discovery-v1', now, slidingMs: 365 * DAY_MS },
+        );
+        if (startedCommitted.kind !== 'created') throw new Error('unreachable');
+        await ctx.storage.syncAppendObservations(
+          scope, p.id, startedCommitted.session, [chunkObs({ externalRef: 'ext-maint-wd-c', fingerprint: 'fp-1' })], now,
+        );
+        await runCommitToConvergence(ctx.storage, scope, p.id, 'tok-maint-wd-c', commitParams({ now: now + 1 }));
+        await ctx.storage.syncFinalize(scope, p.id, 'tok-maint-wd-c', now + 2);
+
+        // active: sync_staging が1行 → 保護対象(finalizeしない)
+        const startedActive = await ctx.storage.syncStart(
+          scope, p.id, { token: 'tok-maint-wd-a', origin: 'selfheal-v1', now, slidingMs: 365 * DAY_MS },
+        );
+        if (startedActive.kind !== 'created') throw new Error('unreachable');
+        await ctx.storage.syncAppendObservations(
+          scope, p.id, startedActive.session, [chunkObs({ externalRef: 'ext-maint-wd-a', fingerprint: 'fp-2' })], now,
+        );
+        await runCommitToConvergence(ctx.storage, scope, p.id, 'tok-maint-wd-a', commitParams({ now: now + 1 }));
+
+        expect((await ctx.storage.countsSnapshot()).sync_staging).toBe(2);
+        const deleted = await ctx.storage.purgeSyncWorkdata();
+        expect(deleted).toBeGreaterThanOrEqual(1); // 少なくともcommitted分(staging+seen)
+        expect((await ctx.storage.countsSnapshot()).sync_staging).toBe(1); // committed分のみ消え、active分は残る
+      });
+
+      it('countsSnapshot: 11エンティティのキーを返し、実際の行数を反映する', async () => {
+        const p = await ctx.storage.createProject(scope, { name: 'proj-maint-counts' }, now);
+        await ctx.storage.createTestCaseManual(scope, p.id, tcInput(), historyEntry(), now);
+
+        const counts = await ctx.storage.countsSnapshot();
+        expect(Object.keys(counts).sort()).toEqual([
+          'api_tokens', 'organizations', 'projects', 'sessions', 'sync_sessions', 'sync_staging',
+          'test_case_history', 'test_case_identities', 'test_case_observations', 'test_cases', 'users',
+        ].sort());
+        expect(counts.organizations).toBe(1);
+        expect(counts.test_cases).toBe(1);
+      });
+    });
   });
 }

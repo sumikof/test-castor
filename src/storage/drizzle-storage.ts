@@ -101,6 +101,22 @@ const HISTORY_BATCH_ROWS = 16; // test_case_history: 6列 → 96 bind(SEEN_BATCH
 const IDENTITY_BATCH_ROWS = 10; // test_case_identities: 9列 → 90 bind
 const ID_LOOKUP_BATCH_SIZE = 90; // IN(...) 系の存在チェック(1件1 bind + 固定少数)
 
+// task-22-brief.md「purgeSyncWorkdata(): Promise<number>」。ブリーフのシグネチャは now/batchLimit を
+// 露出しない(purgeObservations/deleteExpiredUiSessionsと異なり引数を取らない)ため、小バッチ幅は
+// 呼び出し側が指定できない固定定数にする。DELETE 1文あたりの行数上限であり(operations.md §4.1
+// 「小バッチ」)、この定数自体を跨いで反復するのは呼び出し側(src/maintenance/purge.ts)の責務。
+const WORKDATA_PURGE_BATCH = 500;
+
+/**
+ * committed/expired セッションに属する行を対象にする述語(purgeSyncWorkdata が sync_staging/
+ * sync_seen の両方に適用する)。呼び出しごとに新しい SQL オブジェクトを生成する
+ * (latestObservationSubquery/rollupIsStaleExpr と同じ流儀。同一 SQL インスタンスを複数文へ
+ * 使い回さない)。
+ */
+function deadSyncSessionPredicate(): SQL {
+  return sql`sync_token IN (SELECT token FROM sync_sessions WHERE status IN ('committed', 'expired'))`;
+}
+
 /**
  * sync-protocol.md「committed-JOIN フェンス」: 対象 origin の観測のうち、committed セッション由来
  * または当セッション自身(:T)由来のみを対象にした「この test_case の最新観測」を返す相関サブクエリ
@@ -1235,6 +1251,102 @@ export function createDrizzleStorage(driver: StorageDriver): Storage {
           stale: Number(staleRow?.n ?? 0),
         },
       };
+    },
+
+    // --- maintenance(task-22-brief.md)。GC-5 の緊張関係は src/storage/interface.ts のコメント・
+    // タスク報告で明示済み: 以下5メソッドは orgScope を取らない(ブリーフの明示シグネチャどおり。
+    // システム全体・プロジェクト横断のメンテナンス操作のため)。---
+
+    // operations.md §4.1「パージの削除述語」を rowid サブクエリパターン(notes.md 実装標準。素の
+    // DELETE...LIMIT は libSQL 非互換のため使わない)へ翻訳したもの。1回の呼び出し = 1 DELETE 文のみ
+    // (syncCommitWindow の windowLimit と同じ「1回=1バッチ」設計)。閾値未満になるまで繰り返し呼ぶのは
+    // 呼び出し側(src/maintenance/purge.ts)の責務。
+    async purgeObservations(p: { now: number; retentionMs: number; batchLimit: number }) {
+      const threshold = p.now - p.retentionMs;
+      const counts = await driver.batch([
+        db.delete(testCaseObservations).where(sql`rowid IN (
+          SELECT o.rowid FROM test_case_observations o
+          JOIN sync_sessions s ON s.token = o.sync_token
+          WHERE s.status = 'committed'
+            AND o.created_at < ${threshold}
+            AND o.id NOT IN (
+              SELECT id FROM (
+                SELECT o2.id AS id, ROW_NUMBER() OVER (
+                  PARTITION BY o2.test_case_id, o2.origin
+                  ORDER BY o2.created_at DESC, o2.id DESC
+                ) AS rn
+                FROM test_case_observations o2
+                JOIN sync_sessions s2 ON s2.token = o2.sync_token
+                WHERE s2.status = 'committed'
+              ) WHERE rn = 1
+            )
+          LIMIT ${p.batchLimit}
+        )`),
+      ]);
+      return counts[0] ?? 0;
+    },
+
+    // sync-protocol.md「失効の執行モデル」のセカンダリ(Cron sweep)。全プロジェクト対象(project 単位の
+    // 遅延評価は既存の syncExpireLapsed が担う)。対象行が長期的に蓄積しないため LIMIT なしの単一 UPDATE。
+    async sweepExpiredSyncSessions(now: number) {
+      const counts = await driver.batch([
+        db.update(syncSessions).set({ status: 'expired' }).where(and(
+          eq(syncSessions.status, 'active'),
+          sql`${syncSessions.expiresAt} <= ${now}`,
+        )),
+      ]);
+      return counts[0] ?? 0;
+    },
+
+    // purgeObservations と同じ「1回の呼び出し=1バッチ」設計。sessions は UI セッションストア
+    // (data-model.md「Session」)。
+    async deleteExpiredUiSessions(now: number, limit: number) {
+      const counts = await driver.batch([
+        db.delete(sessions).where(sql`rowid IN (
+          SELECT rowid FROM sessions WHERE expires_at <= ${now} LIMIT ${limit}
+        )`),
+      ]);
+      return counts[0] ?? 0;
+    },
+
+    // committed/expired セッションの sync_staging + sync_seen(schema.ts の設計ノートどおり
+    // セッション寿命のみの作業データ)を削除する。ブリーフのシグネチャに now/batchLimit が無いため
+    // WORKDATA_PURGE_BATCH(固定定数)で1回の呼び出しにつき各テーブル最大その件数・計2文のみ実行する。
+    async purgeSyncWorkdata() {
+      const counts = await driver.batch([
+        db.delete(syncStaging).where(sql`rowid IN (
+          SELECT rowid FROM sync_staging WHERE ${deadSyncSessionPredicate()} LIMIT ${WORKDATA_PURGE_BATCH}
+        )`),
+        db.delete(syncSeen).where(sql`rowid IN (
+          SELECT rowid FROM sync_seen WHERE ${deadSyncSessionPredicate()} LIMIT ${WORKDATA_PURGE_BATCH}
+        )`),
+      ]);
+      return (counts[0] ?? 0) + (counts[1] ?? 0);
+    },
+
+    // 主要テーブルの行数スナップショット(概算容量監視ログ用)。data-model.md のエンティティ関係図が
+    // 定義する11エンティティのみ対象(sync_seen は data-model.md/sync-protocol.md 未記載の内部実装専用
+    // テーブルのため対象外。schema.ts の設計ノート参照)。
+    async countsSnapshot() {
+      const tables: ReadonlyArray<{ key: string; table: any }> = [
+        { key: 'organizations', table: organizations },
+        { key: 'users', table: users },
+        { key: 'sessions', table: sessions },
+        { key: 'projects', table: projects },
+        { key: 'test_cases', table: testCases },
+        { key: 'test_case_identities', table: testCaseIdentities },
+        { key: 'test_case_observations', table: testCaseObservations },
+        { key: 'test_case_history', table: testCaseHistory },
+        { key: 'sync_sessions', table: syncSessions },
+        { key: 'sync_staging', table: syncStaging },
+        { key: 'api_tokens', table: apiTokens },
+      ];
+      const result: Record<string, number> = {};
+      for (const { key, table } of tables) {
+        const [row] = await db.select({ n: count() }).from(table);
+        result[key] = Number(row?.n ?? 0);
+      }
+      return result;
     },
   } satisfies Storage;
 
