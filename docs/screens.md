@@ -303,7 +303,7 @@ S-08 テストケース一覧（トースト: 15件を承認しました）
 |---|---|---|---|
 | S-08 テストケース一覧 | 所有権・drift・stale・target フィルタ | ユースケース上不可欠なフィルタ条件 | `GET .../testcases?ownership=&drift=&target=` |
 | S-08 テストケース一覧 | チェックボックス + 一括操作バー | 大量取り込み結果の効率的処理 | `POST .../testcases/bulk` |
-| S-08 テストケース一覧 | 同期結果サマリー | 再同期後に何が変わったかの把握手段 | sync commit レスポンスの `summary` |
+| S-08 テストケース一覧 | 同期結果サマリー | 再同期後に何が変わったかの把握手段 | `GET .../sync/status` の `last_summary` |
 | S-10 テストケース詳細 | Identity 情報タブ | per-origin の stale 状態確認 | `GET .../testcases/:id/identities` |
 | S-10 テストケース詳細 | 復帰ボタン（archived → draft） | アーカイブからの復帰操作 | `PATCH .../testcases/:id` (status) |
 | S-10 テストケース詳細 | 構造化 Diff | canonical vs 最新観測の差分表示 | `GET .../testcases/:id/diff` |

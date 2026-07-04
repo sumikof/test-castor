@@ -46,7 +46,7 @@
 | 表示名 | `user-display-name` | `display_name` | — |
 | メール | `user-email` | `email` | — |
 | ロール | `user-role` | `role` のバッジ表示（admin/editor/viewer） | 色分けバッジ |
-| 最終ログイン | `user-last-login` | 最終ログイン日時 | **※ API 未定義** — `GET /api/v1/users` のレスポンスに `last_login` がない。Session テーブルの最新 `created_at` から派生するか、User テーブルに列追加が必要 |
+| 最終ログイン | `user-last-login` | 最終ログイン日時 | `GET /api/v1/users` レスポンスの `last_login_at`(D-05。未ログインは null) |
 
 ### テーブル行
 
@@ -96,13 +96,14 @@
       "display_name": "田中太郎",
       "role": "admin",
       "created_at": 1719388800000,
-      "updated_at": 1719388800000
+      "updated_at": 1719388800000,
+      "last_login_at": 1719388800000
     }
   ]
 }
 ```
 
-> **API ギャップ:** ワイヤーフレームの「最終ログイン」列に対応するフィールドが `GET /api/v1/users` レスポンスにない。実装時に `last_login_at` フィールドの追加、または Session テーブルからの派生を検討する必要がある。
+> **実装メモ:** 「最終ログイン」列は `GET /api/v1/users` レスポンスの `last_login_at`(D-05、`src/http/api/serializers.ts`)を表示する。未ログインユーザーは null。
 
 ---
 
