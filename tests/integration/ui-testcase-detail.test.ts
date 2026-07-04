@@ -8,6 +8,7 @@ import {
   makeTestApp, wipe, cookieHeader, setupAndLogin, loginAs, createProject, issueToken, FIXED_NOW, type TestApp,
 } from './helpers';
 import { seedCommittedObservation } from './helpers-seed';
+import { renderGherkin } from '../../src/domain/gherkin';
 
 // --- ローカルテストユーティリティ(ui-testcase-list.test.ts と同じ規約でファイルごとに複製する) ---
 
@@ -734,6 +735,30 @@ describe('SSR: テストケース作成/詳細/編集 + タブ(S-09〜S-14)', ()
       expect(examplesHtml).toContain('下限境界');
       expect(examplesHtml).toContain('上限超過');
       expect(examplesHtml).toContain('成功');
+    });
+
+    it('data-raw のコピー文は domain/renderGherkin の出力と完全一致する(C3 の乖離ガード)', async () => {
+      const admin = await setupAndLogin(ctx.app);
+      const { body: project } = await createProject(ctx.app, admin, 'gherkin-raw-svc');
+      const { id } = await createViaForm(ctx, admin, project.id, {}, [
+        ['param_name[]', 'case-a'], ['param_inputs[]', '{"x":1}'], ['param_expected[]', 'ok'],
+      ]);
+      const { html } = await getTab(ctx, admin.jar, project.id, id, 'gherkin');
+
+      // data-raw 属性値を HTML アンエスケープして JSON.parse し、コピー払い出し文字列そのものを比較する。
+      const m = html.match(/data-raw="([^"]*)"/);
+      expect(m).not.toBeNull();
+      const unescaped = (m as RegExpMatchArray)[1]!
+        .replaceAll('&quot;', '"').replaceAll('&#39;', "'")
+        .replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&amp;', '&');
+      const raw = JSON.parse(unescaped) as string;
+
+      const expected = renderGherkin({
+        title: BASE_FIELDS.title, target: BASE_FIELDS.target,
+        given: BASE_FIELDS.given, when: BASE_FIELDS.when, then: BASE_FIELDS.then,
+        parameters: [{ name: 'case-a', inputs: { x: 1 }, expected: 'ok' }],
+      });
+      expect(raw).toBe(expected);
     });
   });
 

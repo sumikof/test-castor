@@ -98,20 +98,36 @@ function renderExamplesTable(parameters: ParamRow[]): string[] {
   return allRows.map((row) => `      | ${row.map((cell, i) => padDisplay(cell, colWidths[i] ?? 0)).join(' | ')} |`);
 }
 
-/** S-13 のレンダリング仕様に一致させる(Feature: target-or-title、Examples 表は parameters ありの時のみ)。 */
-export function renderGherkin(tc: GherkinInput): string {
+/** S-13 の行データ。コピー文(renderGherkin)と DOM 表示(GherkinTabContent)の両方をここから導出し、
+ * feature/Scenario 判定の二重実装(HANDOVER C3 の drift 危険)を根絶する。 */
+export interface GherkinLines {
+  feature: string;
+  scenario: string;
+  isOutline: boolean;
+  given: string;
+  when: string;
+  then: string;
+}
+
+export function buildGherkinLines(tc: GherkinInput): GherkinLines {
   const feature = tc.target && tc.target.trim().length > 0 ? tc.target : tc.title;
   const hasParams = Array.isArray(tc.parameters) && tc.parameters.length > 0;
+  return {
+    feature: `Feature: ${feature}`,
+    scenario: hasParams ? `  Scenario Outline: ${tc.title}` : `  Scenario: ${tc.title}`,
+    isOutline: hasParams,
+    given: `    Given ${tc.given}`,
+    when: `    When ${tc.when}`,
+    then: `    Then ${tc.then}`,
+  };
+}
 
-  const lines: string[] = [];
-  lines.push(`Feature: ${feature}`);
-  lines.push('');
-  lines.push(hasParams ? `  Scenario Outline: ${tc.title}` : `  Scenario: ${tc.title}`);
-  lines.push(`    Given ${tc.given}`);
-  lines.push(`    When ${tc.when}`);
-  lines.push(`    Then ${tc.then}`);
+/** S-13 のレンダリング仕様に一致させる(Feature: target-or-title、Examples 表は parameters ありの時のみ)。 */
+export function renderGherkin(tc: GherkinInput): string {
+  const l = buildGherkinLines(tc);
+  const lines: string[] = [l.feature, '', l.scenario, l.given, l.when, l.then];
 
-  if (hasParams && tc.parameters) {
+  if (l.isOutline && tc.parameters) {
     lines.push('');
     lines.push('    Examples:');
     lines.push(...renderExamplesTable(tc.parameters));

@@ -42,7 +42,7 @@ import type { Status, Category, Ownership, Role, HistoryAction } from '../../sch
 import { canTransition, computeHumanPatch } from '../../domain/testcase-rules';
 import type { ParamRow } from '../../domain/testcase-rules';
 import { buildHistoryEntries } from '../../domain/history-delta';
-import { renderGherkin } from '../../domain/gherkin';
+import { buildGherkinLines, renderGherkin } from '../../domain/gherkin';
 import { toDiffJson } from '../api/serializers';
 import { patchTestCaseInput } from '../../schemas/api';
 import type { Paged } from '../../storage/interface';
@@ -481,22 +481,23 @@ function GherkinExamplesTable(props: { parameters: ParamRow[] }) {
 function GherkinTabContent(props: { tc: TestCaseRow }) {
   const { tc } = props;
   const parameters: ParamRow[] | null = tc.parameters === null ? null : (JSON.parse(tc.parameters) as ParamRow[]);
-  const hasParams = !!parameters && parameters.length > 0;
-  const feature = tc.target && tc.target.trim().length > 0 ? tc.target : tc.title;
-  const raw = renderGherkin({ title: tc.title, target: tc.target, given: tc.given, when: tc.when, then: tc.then, parameters });
+  // コピー文(data-raw)と DOM 表示を同一の入力・同一の導出(domain/gherkin)から得る(C3)。
+  const input = { title: tc.title, target: tc.target, given: tc.given, when: tc.when, then: tc.then, parameters };
+  const lines = buildGherkinLines(input);
+  const raw = renderGherkin(input);
 
   return (
     <div data-testid="gherkin-tab-content">
       <pre data-testid="gherkin-content" data-raw={JSON.stringify(raw)}>
-        <div data-testid="gherkin-feature">{`Feature: ${feature}`}</div>
+        <div data-testid="gherkin-feature">{lines.feature}</div>
         {'\n'}
-        <div data-testid={hasParams ? 'gherkin-scenario-outline' : 'gherkin-scenario'}>
-          {hasParams ? `  Scenario Outline: ${tc.title}` : `  Scenario: ${tc.title}`}
+        <div data-testid={lines.isOutline ? 'gherkin-scenario-outline' : 'gherkin-scenario'}>
+          {lines.scenario}
         </div>
-        <div data-testid="gherkin-given">{`    Given ${tc.given}`}</div>
-        <div data-testid="gherkin-when">{`    When ${tc.when}`}</div>
-        <div data-testid="gherkin-then">{`    Then ${tc.then}`}</div>
-        {hasParams && parameters && (
+        <div data-testid="gherkin-given">{lines.given}</div>
+        <div data-testid="gherkin-when">{lines.when}</div>
+        <div data-testid="gherkin-then">{lines.then}</div>
+        {lines.isOutline && parameters && (
           <>
             {'\n'}
             <div>    Examples:</div>
