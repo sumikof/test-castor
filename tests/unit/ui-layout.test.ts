@@ -57,6 +57,8 @@ describe('ui/layout: Layout', () => {
     expect(html).toContain('payment-service');
     expect(html).toContain('data-testid="nav-tokens"');
     expect(html).toContain('data-testid="nav-settings"');
+    // review round(Finding 5): 設定リンクは実在しない /settings ではなく S-16(トークン一覧)へ向ける。
+    expect(html).toContain(`href="/projects/${project.id}/tokens" data-testid="nav-settings"`);
   });
 
   it('ProjectContextHeader: viewer にはトークン/設定リンクを出さない', async () => {

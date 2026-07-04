@@ -169,7 +169,11 @@ function ProjectContextHeader(props: { project: ProjectRow; user: UserRow }) {
       <nav class="project-context-nav" data-testid="project-context-nav">
         <a href={`/projects/${pid}/testcases`} data-testid="nav-testcases">テストケース</a>
         {isAdmin && <a href={`/projects/${pid}/tokens`} data-testid="nav-tokens">API トークン</a>}
-        {isAdmin && <a href={`/projects/${pid}/settings`} data-testid="nav-settings">設定</a>}
+        {/* review round(FINAL whole-branch review Finding 5・Minor): `/projects/${pid}/settings` は
+            存在しないルート(404 dead end)。プロジェクト設定として実在する唯一の画面は S-16(API
+            トークン一覧。docs/screens/project-settings/S-16-api-token-list.md)なので、そちらへ
+            向ける(data-testid はそのまま維持)。 */}
+        {isAdmin && <a href={`/projects/${pid}/tokens`} data-testid="nav-settings">設定</a>}
       </nav>
     </div>
   );
