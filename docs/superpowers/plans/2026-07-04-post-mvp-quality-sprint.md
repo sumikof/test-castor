@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** docs/HANDOVER.md §4.2 の繰延 22 項目を消化する(実装 17 / 検証済み注記 1 = C8 / 据え置き 3 = C5・C6・C9 は既録の判断維持で変更なし)。
+**Goal:** docs/HANDOVER.md §4.2 の繰延 22 項目を消化する(実装 18 / 検証済み注記 1 = C8 / 据え置き 3 = C5・C6・C9 は既録の判断維持で変更なし。実装は 17 タスクに束ねる — Task 7 が B8 と別コミットで B9 も内包)。
 
 **Architecture:** 挙動追加なしの品質スプリント。(1) docs の stale 記述修正、(2) 挙動保存リファクタ(C1/C2/C3)、(3) maintenance エントリの設定結合分離(C10/C11 — 意図的なセマンティクス変更: cron/CLI は署名鍵を読まなくなる)、(4) テスト穴埋め(B 系)、(5) node ローダー改善(D 系)。
 

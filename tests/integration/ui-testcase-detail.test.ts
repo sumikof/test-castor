@@ -858,6 +858,12 @@ describe('SSR: テストケース作成/詳細/編集 + タブ(S-09〜S-14)', ()
         parameters: [{ name: 'case-a', inputs: { x: 1 }, expected: 'ok' }],
       });
       expect(raw).toBe(expected);
+
+      // 可視 DOM 側も同じ buildGherkinLines 由来であることをこのテスト内で自己完結的に断定する
+      // (コピー文と DOM が同一ソースから出ることの直接確認。パラメータありなので Scenario Outline)。
+      expect(hasTag(html, 'gherkin-scenario-outline')).toBe(true);
+      expect(tagText(html, 'gherkin-scenario-outline')).toBe(`  Scenario Outline: ${BASE_FIELDS.title}`);
+      expect(tagText(html, 'gherkin-feature')).toBe(`Feature: ${BASE_FIELDS.target}`);
     });
   });
 

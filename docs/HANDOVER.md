@@ -113,7 +113,7 @@
 - **C3** `GherkinTabContent` がコピー用テキスト生成で `renderGherkin` の feature/Scenario 判定を再導出（**drift 危険**: 片方だけ編集すると乖離する）→ 単一関数から両方導出するのが本命
 - **C5** UNIQUE 制約違反の検出が文字列一致（3 ドライバ共通の cause-chain 探索・契約テスト済み）→ 構造化エラーコード化の検討
 - **C6** `findUserForLogin` がグローバル検索（**単一 org 前提**）→ マルチ org 化する時は必ず修正。docs/auth-security.md に例外として明記済み
-- **C8** API ルートの middleware 順序（resolveProject vs zValidator）の様式不統一（機能は全箇所正しい）（2026-07-04 検証: API 全 32 ルート中 resolveProject+zValidator 併用の 10 箇所すべてが resolveProject→zValidator 順で統一済み・逸脱ゼロ。コード変更不要と確定）
+- **C8** API ルートの middleware 順序（resolveProject vs zValidator）の様式不統一（機能は全箇所正しい）（2026-07-04 検証: resolveProject と zValidator を併用する API ルート 10 箇所すべてが resolveProject→zValidator 順で統一済み・逆順ゼロ。順序を変える fix は no-op のためコード変更不要と確定）
 - **C9** `applyBulkAction` が `canTransition` に委譲していない（bulk は意図的に狭いマトリクス。共有すると過結合になる判断も既録）
 - **C10** `src/entry/workers.ts` の `depsFrom` が scheduled 用に Auth+limiters まで構築（cron tick 毎に不要オブジェクト生成）→ storage+clock の最小 builder 分離
 - **C11** `maintenance-cli` が retentionMs 取得のためだけに `loadConfig` 全体を呼ぶ（SESSION_SIGNING_KEYS 警告が無関係に出る。C10 と同型）
