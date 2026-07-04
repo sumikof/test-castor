@@ -93,6 +93,8 @@
 
 ### 4.2 繰延事項（最終レビュー裁定 defer-post-MVP。全 22 項目）
 
+> **2026-07-04 更新:** 本節のうち B1-B6/B8/B9・C1-C3・C10-C11・A2-A3・D1-D3 は品質スプリント（`docs/superpowers/plans/2026-07-04-post-mvp-quality-sprint.md`）で消化済み（テスト 760→815）。C8 は検証の結果「既に統一済み・変更不要」と確定（当該行の追記参照）。C5/C6/C9 は既録の判断のまま据え置き（C6 はマルチ org 化時に必須）。C10/C11 は意図的なセマンティクス変更を含む: **maintenance 系エントリ（workers scheduled / maintenance-cli）は SESSION_SIGNING_KEYS を読まなくなった**（不正な鍵でも cron は走る。`loadMaintenanceRetentionMs` が retention のみ読む）。
+
 テストカバレッジ系（機能は他レイヤーで実証済み・穴だけ塞ぐ類）:
 
 - **B1** 入力スキーマ約 15 種（src/schemas/api.ts 系）の直接単体テスト無し（ルート統合テスト経由でのみ検証）
