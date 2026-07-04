@@ -459,6 +459,26 @@ describe('SSR: テストケース作成/詳細/編集 + タブ(S-09〜S-14)', ()
       expect(selectedOptionValue(html, 'select-status')).toBe('approved');
     });
 
+    it('古い version で status POST → 303 + flash=occ_conflict、状態は変わらない(B4)', async () => {
+      const admin = await setupAndLogin(ctx.app);
+      const { body: project } = await createProject(ctx.app, admin, 'status-occ-svc');
+      const { id } = await createViaForm(ctx, admin, project.id);
+      // 並行更新をシミュレート(version=2 へ)。POST は古い version=1 を送る。
+      await ctx.rawExec(`UPDATE test_cases SET version = 2 WHERE id = ${sqlStr(id)}`);
+
+      const res = await ctx.app.request(
+        `/projects/${project.id}/testcases/${id}/status`,
+        formReq({ to: 'approved', version: '1', _csrf: admin.csrf ?? '' }, { Cookie: cookieHeader(admin.jar) }),
+      );
+      expect(res.status).toBe(303);
+      const loc = new URL(res.headers.get('location') as string, 'http://x');
+      expect(loc.searchParams.get('flash')).toBe('occ_conflict');
+
+      // 識別: ステータスは draft のまま(承認は反映されていない)
+      const { html } = await getDetail(ctx, admin.jar, project.id, id);
+      expect(selectedOptionValue(html, 'select-status')).toBe('draft');
+    });
+
     it('archived: 復帰ボタンのみ表示・approved へのタンパリング POST は拒否される(状態不変)', async () => {
       const admin = await setupAndLogin(ctx.app);
       const { body: project } = await createProject(ctx.app, admin, 'archived-svc');
@@ -673,6 +693,34 @@ describe('SSR: テストケース作成/詳細/編集 + タブ(S-09〜S-14)', ()
       expect(hasTag(html, 'diff-no-drift')).toBe(true);
       const { html: detailHtml } = await getDetail(ctx, admin.jar, project.id, id);
       expect(hasTag(detailHtml, 'badge-drift')).toBe(false);
+    });
+
+    it('古い version で accept-fingerprint POST → 303 + tab=diff&flash=occ_conflict、drift は残る(B4)', async () => {
+      const admin = await setupAndLogin(ctx.app);
+      const { body: project } = await createProject(ctx.app, admin, 'acceptfp-occ-svc');
+      const { id } = await createViaForm(ctx, admin, project.id);
+      // drift 状態を作った上で並行更新をシミュレート(version=2)。POST は古い version=1 を送る。
+      await ctx.rawExec(
+        `UPDATE test_cases SET ownership = 'machine', mirror_origin = 'discovery-v1', drift = 1, fingerprint = 'old-fp', version = 2 WHERE id = ${sqlStr(id)}`,
+      );
+      await seedCommittedObservation(ctx.rawExec, {
+        pid: project.id, testCaseId: id, externalRef: 'ext-occ', origin: 'discovery-v1', fingerprint: 'new-fp',
+        observed: { given: '新観測 given', when: BASE_FIELDS.when, then: BASE_FIELDS.then, parameters: null, source_ref: {}, schema_version: '1.0' },
+        at: FIXED_NOW + 2000,
+      });
+
+      const res = await ctx.app.request(
+        `/projects/${project.id}/testcases/${id}/accept-fingerprint`,
+        formReq({ version: '1', _csrf: admin.csrf ?? '' }, { Cookie: cookieHeader(admin.jar) }),
+      );
+      expect(res.status).toBe(303);
+      const loc = new URL(res.headers.get('location') as string, 'http://x');
+      expect(loc.searchParams.get('tab')).toBe('diff');
+      expect(loc.searchParams.get('flash')).toBe('occ_conflict');
+
+      // 識別: drift は解消されていない(バッジが残る)
+      const { html: detailHtml } = await getDetail(ctx, admin.jar, project.id, id);
+      expect(hasTag(detailHtml, 'badge-drift')).toBe(true);
     });
 
     it('drift なしで accept-fingerprint-confirm → ダイアログを開かず 303 で diff タブへ(NO_DRIFT ガード)', async () => {
