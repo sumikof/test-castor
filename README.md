@@ -106,10 +106,10 @@ TMS_DB_PATH=./tms.sqlite npm run maintenance:node
 OS の cron から1時間毎に実行する例:
 
 ```
-0 * * * * cd /path/to/tms-web-service && TMS_DB_PATH=/var/lib/tms/tms.sqlite SESSION_SIGNING_KEYS='{"k1":"<secret>"}' node --import ./src/entry/node-ts-loader.mjs src/entry/maintenance-cli.ts >> /var/log/tms-maintenance.log 2>&1
+0 * * * * cd /path/to/tms-web-service && TMS_DB_PATH=/var/lib/tms/tms.sqlite node --import ./src/entry/node-ts-loader.mjs src/entry/maintenance-cli.ts >> /var/log/tms-maintenance.log 2>&1
 ```
 
-(`npm run maintenance:node` と等価な内容を、cron 経由で環境変数を渡しやすいよう `node` 直接呼び出しの形で例示している)
+(`npm run maintenance:node` と等価な内容を、cron 経由で環境変数を渡しやすいよう `node` 直接呼び出しの形で例示している。maintenance-cli は署名鍵設定 `SESSION_SIGNING_KEYS` を読まないため cron 側に渡す必要はない — 参照する env は `TMS_DB_PATH` と `OBSERVATION_RETENTION_MS` のみ)
 
 ## 初期セットアップ
 

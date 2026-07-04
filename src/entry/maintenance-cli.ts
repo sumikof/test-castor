@@ -13,7 +13,7 @@
 // 理由・実装は node-ts-loader.mjs のコメント参照。tsx 等の新規パッケージは追加しない)。
 // このファイル自体は import.meta.main の直下でのみ実行し、他モジュールから import されても
 // 副作用(DB接続・vacuum・process.exitCode 変更)を起こさない(node-entry.test.ts と同じ規約)。
-import { loadConfig } from '../http/config';
+import { loadMaintenanceRetentionMs } from '../http/config';
 import { createBetterSqlite3Storage } from '../storage/adapters/better-sqlite3';
 import { runMaintenance } from '../maintenance';
 
@@ -22,15 +22,17 @@ import { runMaintenance } from '../maintenance';
  * 続けて `PRAGMA incremental_vacuum` を発行してから接続を閉じる。runMaintenance 自体の構造化ログ
  * (`{"event":"maintenance_run",...}`)はそのまま標準出力に流れる(src/maintenance/index.ts 既定の
  * log()。CF scheduled と同じ形式)。
+ * 署名鍵設定(SESSION_SIGNING_KEYS)は読まない(HANDOVER C11: maintenance に無関係な dev-key 警告や
+ * 鍵設定不備での失敗を持ち込まない。必要な env は TMS_DB_PATH と OBSERVATION_RETENTION_MS のみ)。
  */
 export async function runMaintenanceCli(dataPath = process.env.TMS_DB_PATH ?? './tms.sqlite'): Promise<void> {
-  const config = loadConfig(process.env);
+  const retentionMs = loadMaintenanceRetentionMs(process.env);
   const { storage, sqlite } = createBetterSqlite3Storage(dataPath);
   try {
     await runMaintenance({
       storage,
       now: () => Date.now(), // GC-3: 実クロックを読むのは entry 層のみ
-      retentionMs: config.observationRetentionMs,
+      retentionMs,
     });
     // オンプレのみ(operations.md §4.3): パージ後にファイルサイズを回収する。
     // auto_vacuum=INCREMENTAL は接続初期化時(better-sqlite3.ts)に設定済み前提。

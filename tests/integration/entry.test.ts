@@ -96,25 +96,37 @@ describe('統合: entry(src/entry/workers.ts の実配線)', () => {
     expect(JSON.stringify(body)).not.toContain('not-valid-json');
   });
 
-  it('scheduled: config bootstrap失敗時も例外を漏らさずに完了する(構造化ログを出し、この回のメンテナンスはスキップ)', async () => {
+  // C10(HANDOVER §4.2)以降、depsFrom は署名鍵 config(loadConfig/loadSigningKeys)を読まない。
+  // 以前ここにあった「不正な SESSION_SIGNING_KEYS → bootstrap 失敗ログ + スキップ」テストは前提が
+  // 消えたため、同じポイズン値で「cron は鍵設定と無関係に maintenance を完走する」ことを検証する
+  // (fetch 側の bootstrap 失敗が GC-4 スキーマで返ることは上のテストが引き続き担保する)。
+  it('scheduled: SESSION_SIGNING_KEYS が不正でも maintenance は実行される(C10: cron は署名鍵を読まない)', async () => {
+    const setupRes = await SELF.fetch('https://example.com/api/v1/setup', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        organization_name: 'Acme3', admin_email: 'admin3@example.com',
+        admin_password: 'admin-pass-1', admin_display_name: 'Admin3',
+      }),
+    });
+    expect(setupRes.status).toBe(201);
+    const setupBody = await setupRes.json<any>();
+    const userId = setupBody.user.id as string;
+
+    const expiredAt = Date.now() - 1000;
+    await env.DB.prepare('INSERT INTO sessions (id, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)')
+      .bind('sess-badkeys-expired', userId, expiredAt, expiredAt - 100_000)
+      .run();
+
     const poisonedEnv = { ...env, SESSION_SIGNING_KEYS: 'not-valid-json' };
     const ctx = createExecutionContext();
     const controller = createScheduledController();
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    try {
-      expect(() => workersEntry.scheduled(controller, poisonedEnv as any, ctx)).not.toThrow();
-      await waitOnExecutionContext(ctx);
+    expect(() => workersEntry.scheduled(controller, poisonedEnv as any, ctx)).not.toThrow();
+    await waitOnExecutionContext(ctx);
 
-      // 構造化 {"event":...} ログ(runMaintenance と同じ流儀)が出ることを確認する。
-      // サーバ側ログは D-11 の精神どおり詳細(err.message)を含めてよい — 漏らしてはいけないのは
-      // fetch のレスポンス本文(上のテストで検証済み)であって、サーバ内部ログではない。
-      expect(errorSpy).toHaveBeenCalled();
-      const parsedCalls = errorSpy.mock.calls
-        .map((args) => { try { return JSON.parse(String(args[0])); } catch { return undefined; } });
-      expect(parsedCalls.some((p) => p?.event === 'scheduled_maintenance_bootstrap_failed')).toBe(true);
-    } finally {
-      errorSpy.mockRestore();
-    }
+    // 鍵が不正でも maintenance は走り、期限切れセッションが削除されている(識別: 実効果で確認)
+    const remaining = await env.DB.prepare('SELECT id FROM sessions WHERE id = ?').bind('sess-badkeys-expired').first();
+    expect(remaining).toBeNull();
   });
 
   // レビュー finding(re-review round2)「catch scope swallows genuine maintenance failures」:

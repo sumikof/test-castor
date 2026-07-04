@@ -156,3 +156,12 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     commitWindowLimit: parsePositiveInt(env.SYNC_COMMIT_WINDOW_LIMIT, DEFAULTS.commitWindowLimit),
   };
 }
+
+/**
+ * maintenance 系エントリ(workers scheduled / maintenance-cli)専用の最小リーダー(HANDOVER C10/C11)。
+ * cron 実行は署名鍵・レートリミッタと無関係のため、loadConfig(= loadSigningKeys の警告/throw)を
+ * 経由せず observation retention のみを読む。不正値は既定 90 日へフォールバック(起動を壊さない)。
+ */
+export function loadMaintenanceRetentionMs(env: Record<string, string | undefined>): number {
+  return parsePositiveInt(env.OBSERVATION_RETENTION_MS, DEFAULTS.observationRetentionMs);
+}

@@ -13,7 +13,7 @@
 // "0 * * * *")から呼ばれ、runMaintenance を ctx.waitUntil で実行する(ブリーフの shape のまま)。
 import { Hono } from 'hono';
 import { createApp, type AppDeps, type AppEnv } from '../http/app';
-import { loadConfig } from '../http/config';
+import { loadConfig, loadMaintenanceRetentionMs } from '../http/config';
 import { toErrorResponsePayload } from '../http/errors';
 import { createD1Storage } from '../storage/adapters/d1';
 import { createWebcryptoAuth } from '../auth/webcrypto-auth';
@@ -72,20 +72,25 @@ function getApp(env: Env): Hono<AppEnv> {
   return app;
 }
 
-/** scheduled ハンドラ用の MaintenanceDeps(retentionMs は config.observationRetentionMs をそのまま使う)。 */
+/**
+ * scheduled ハンドラ用の MaintenanceDeps。cron tick は storage+clock+retention だけでよいため、
+ * buildDeps(Auth/RateLimiter/署名鍵 config)を経由しない(HANDOVER C10)。署名鍵設定の不備・警告が
+ * cron maintenance に波及しない(retention の不正値は loadMaintenanceRetentionMs が既定へフォールバック)。
+ */
 function depsFrom(env: Env): MaintenanceDeps {
-  const deps = buildDeps(env);
-  return { storage: deps.storage, now: deps.now, retentionMs: deps.config.observationRetentionMs };
+  return {
+    storage: createD1Storage(env.DB).storage,
+    now: () => Date.now(), // GC-3: 実クロックを読むのは entry 層のみ
+    retentionMs: loadMaintenanceRetentionMs(env as unknown as Record<string, string | undefined>),
+  };
 }
 
 /**
- * scheduled 本体。depsFrom(env)(config 読み込み含む)だけを狭い try/catch で包み、config bootstrap
- * 失敗(不正な SESSION_SIGNING_KEYS 等、src/http/config.ts が同期的に throw する分岐)が ctx.waitUntil の
- * 外へ素の同期例外として漏れないようにする(レビュー finding #1)。GC-4 自体は fetch のエラー応答
- * スキーマの話で scheduled には直接適用されないが、「ハンドラから未捕捉例外を漏らさない」という
- * 同じ趣旨で保護する。失敗時は runMaintenance と同じ {"event":...} 構造化ログ流儀で1行出し、
- * この回のメンテナンスはスキップする(同じ設定不備はどのみち全 HTTP トラフィックを壊すため、
- * cron 側は二次的な保険で十分 — buildDeps/getApp/depsFrom 自体の構造は変えない最小限の変更)。
+ * scheduled 本体。depsFrom(env) だけを狭い try/catch で包み、bootstrap 失敗(D1 バインディング不備等の
+ * 同期 throw)が ctx.waitUntil の外へ素の同期例外として漏れないようにする(レビュー finding #1)。
+ * C10 以降 depsFrom は署名鍵 config を読まないため、SESSION_SIGNING_KEYS の不備はこの catch の対象外
+ * (= cron は鍵設定と無関係に走る)。失敗時は runMaintenance と同じ {"event":...} 構造化ログ流儀で
+ * 1 行出し、この回のメンテナンスはスキップする。
  *
  * re-review round2 finding「catch scope swallows genuine maintenance failures」: 上記の try は
  * bootstrap(depsFrom)のみを対象とし、await runMaintenance(deps) はその外側で(ガードなしで)呼ぶ。
