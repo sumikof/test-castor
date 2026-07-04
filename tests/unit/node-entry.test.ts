@@ -83,4 +83,32 @@ describe('entry/node: createNodeApp', () => {
     expect(res.status).toBe(302);
     expect(res.headers.get('location')).toBe('/setup');
   });
+
+  // --- B9(HANDOVER §4.2): serveStatic 経路。root './public' は cwd 相対 = リポジトリルート
+  // (vitest 実行時 cwd)。app.css/logo.svg はコミット済み、htmx.min.js は postinstall 生成物
+  // (npm install 済みがテスト実行の前提条件なので依存してよい)。 ---
+
+  it('GET /app.css は serveStatic 経由で 200 + text/css を返す(B9)', async () => {
+    const { app } = createNodeApp(':memory:');
+    const res = await app.request('/app.css');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type') ?? '').toContain('text/css');
+    expect((await res.text()).length).toBeGreaterThan(0);
+  });
+
+  it('GET /htmx.min.js は serveStatic 経由で 200 + javascript を返す(B9。postinstall 生成物)', async () => {
+    const { app } = createNodeApp(':memory:');
+    const res = await app.request('/htmx.min.js');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type') ?? '').toContain('javascript');
+  });
+
+  it('未マッチパスは serveStatic を素通りして統一 404 スキーマ(GC-4)で返る(B9)', async () => {
+    const { app } = createNodeApp(':memory:');
+    const res = await app.request('/no-such-asset-xyz.css');
+    expect(res.status).toBe(404);
+    const body = await res.json<any>();
+    expect(body.error.code).toBe('NOT_FOUND');
+    expect(body.error.retryable).toBe(false);
+  });
 });
