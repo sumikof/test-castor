@@ -477,5 +477,50 @@ describe('統合: テストケース Storage拡張 + 読み取り系 API', () =>
       );
       expect(res.status).toBe(200);
     });
+
+    it('他 org の :pid → 404(存在隠蔽。B3)', async () => {
+      const admin = await setupAndLogin(ctx.app);
+      const project = await createProject(ctx.app, admin, 'payment-service');
+      const created = await postTestCase(ctx.app, admin, project.body.id);
+      const createdBody = await created.json<any>();
+
+      const otherOrg = await ctx.storage.setupOrganization({
+        orgName: 'Other Org', adminEmail: 'other-admin-history@example.com', adminPasswordHash: 'unused', adminDisplayName: 'Other Admin', now: FIXED_NOW,
+      });
+      const otherProject = await ctx.storage.createProject(
+        { organizationId: otherOrg.organization.id }, { name: 'other-org-project' }, FIXED_NOW,
+      );
+
+      const res = await ctx.app.request(
+        `/api/v1/projects/${otherProject.id}/testcases/${createdBody.id}/history`,
+        { headers: { Cookie: cookieHeader(admin.jar) } },
+      );
+      expect(res.status).toBe(404);
+      expect((await res.json<any>()).error.code).toBe('NOT_FOUND');
+    });
+
+    it('不正な cursor は 422 にせず先頭ページへフォールバックする(200。domain/cursor の decode null 仕様。B3)', async () => {
+      const admin = await setupAndLogin(ctx.app);
+      const project = await createProject(ctx.app, admin, 'payment-service');
+      const created = await postTestCase(ctx.app, admin, project.body.id);
+      const createdBody = await created.json<any>();
+
+      const baseline = await ctx.app.request(
+        `/api/v1/projects/${project.body.id}/testcases/${createdBody.id}/history`,
+        { headers: { Cookie: cookieHeader(admin.jar) } },
+      );
+      expect(baseline.status).toBe(200);
+      const baselineBody = await baseline.json<any>();
+      expect(baselineBody.items.length).toBeGreaterThan(0); // created 履歴が最低 1 件(非ゼロ識別)
+
+      const res = await ctx.app.request(
+        `/api/v1/projects/${project.body.id}/testcases/${createdBody.id}/history?cursor=not%40%40valid%24%24base64`,
+        { headers: { Cookie: cookieHeader(admin.jar) } },
+      );
+      expect(res.status).toBe(200);
+      const body = await res.json<any>();
+      expect(body.items).toEqual(baselineBody.items); // 先頭ページと同一(フォールバックの識別)
+      expect(body.total).toBe(baselineBody.total);
+    });
   });
 });
