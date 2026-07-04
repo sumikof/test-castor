@@ -185,7 +185,7 @@ describe('SSR: 管理画面(S-16/S-17 トークン、S-18/S-19 ユーザー、S-
       expect(res.status).toBe(403);
     });
 
-    it('存在しない/他プロジェクトの pid → 404 ページ', async () => {
+    it('存在しない pid → 404 ページ', async () => {
       const admin = await setupAndLogin(ctx.app);
       const res = await ctx.app.request('/projects/does-not-exist/tokens', { headers: { Cookie: cookieHeader(admin.jar) } });
       expect(res.status).toBe(404);
@@ -629,7 +629,7 @@ describe('SSR: 管理画面(S-16/S-17 トークン、S-18/S-19 ユーザー、S-
       expect(selectTag).toContain('自身のロールは変更できません');
     });
 
-    it('存在しない/他 org の id → 404', async () => {
+    it('存在しない id → 404', async () => {
       const admin = await setupAndLogin(ctx.app);
       const res = await ctx.app.request('/admin/users/does-not-exist/edit', { headers: { Cookie: cookieHeader(admin.jar) } });
       expect(res.status).toBe(404);
