@@ -8,7 +8,7 @@
 
 ## 1. 現在地（TL;DR）
 
-- **MVP 完成。main = `78bad84` にマージ済み**（fast-forward、2026-07-03）。
+- **MVP 完成。本体は `78bad84` として main へ fast-forward マージ済み**（2026-07-03）。以降のドキュメント整備コミット（本書自身を含む）で main はこの先に進むため、最新 SHA は `git log` を正とする。
 - 全 23 タスク実装 + タスク単位レビュー + 最終 whole-branch レビュー完了。**760 テスト green**（unit 376 / workers 統合 384）、typecheck 0 エラー。
 - E2E 実証済み: `wrangler dev` に対する curl ウォークスルー（セットアップ→ログイン→プロジェクト→トークン発行→sync start/chunk/commit→status→approve）、Node エントリ起動 smoke（`/login`・静的配信・404）。
 - 最終レビューで Critical 1 件（sync commit 工程 6 の drift 収束ガード欠落 = 同期恒久ハング）を捕捉し `ba83f44` で修正・回帰テスト済み。Important 0 件。
@@ -58,7 +58,7 @@
 | OCC 書込 | 事前 check(404/409) + `batch([UPDATE WHERE version, changes()ガード付き history INSERT])` + **影響行数で conflict 判定** + `version = version + 1`（SQL 相対）。`StorageDriver.batch` は `Promise<number[]>` |
 | 窓付き UPDATE の収束 | windowed resume する UPDATE は**自己除外述語必須**（例: 工程 6 の `AND drift = 0`）。SQLite は同値 UPDATE も `changes()` に数えるため、除外が無いと livelock + updated_at churn になる（最終レビュー Critical の教訓） |
 | D1 バインド上限 | ≤100 変数/文。大きな IN/INSERT は `toBatches`（~90/バッチ）で分割 |
-| テナント境界（GC-5） | Storage 全メソッドは第一引数 `orgScope`。例外は authn 専用 2 つ（`findUserForLogin`・`getUserById`）+ システム横断メンテナンス 5 つ（`purgeObservations`・`sweepExpiredSyncSessions`・`deleteExpiredUiSessions`・`purgeSyncWorkdata`・`countsSnapshot`）のみ。**新たな例外を増やさない** |
+| テナント境界（GC-5） | org スコープ付きデータアクセスは第一引数 `orgScope`。orgScope を取らないのは以下の 16 メソッドのみ（分類と根拠は `docs/auth-security.md`「テナント境界」の例外一覧が正本）: 認証解決 2（`findUserForLogin`・`getUserById`）/ セッションストア 4（`createSession`・`getSession`・`deleteSession`・`deleteUserSessions` — authn 基盤・org 判明前に動く）/ API トークン認証 2（`findApiTokenByHash`・`touchTokenLastUsed`）/ セットアップ 2（`countOrganizations`・`setupOrganization` — テナント成立前）/ メンテナンス 5（`purgeObservations`・`sweepExpiredSyncSessions`・`deleteExpiredUiSessions`・`purgeSyncWorkdata`・`countsSnapshot`）/ 同期セッション 1（`syncTouchExpiry` — 推測不能 sync トークンがキー。interface.ts に「GC-5 の追加の例外」と注記あり）。**新たな例外を増やさない**（増やす場合は interface.ts の注記と auth-security.md の一覧を必ず更新） |
 | ポータビリティ（GC-6） | `src/schemas`・`src/domain`・`src/http`・`src/maintenance` から `@cloudflare/workers-types`/D1 型を import しない。CF 固有は adapters と workers エントリのみ |
 | エラースキーマ（GC-4） | 全 API エラーは `{error:{code,message,details?,retryable}}` のみ。エントリの bootstrap 失敗も `toErrorResponsePayload` 経由で同スキーマ（素の例外を漏らさない） |
 | クロック（GC-3） | 日時は全て epoch ms INTEGER。実クロックを読むのはエントリ層のみ。他は `deps.now()`/引数注入。テストは固定クロック |
@@ -81,7 +81,7 @@
 | # | 項目 | 現状と着手時のヒント |
 |---|---|---|
 | 1 | **S-03/S-04 セルフサービスパスワードリセット** | メール基盤が必要。現在は S-19 の管理者手動リセットで代替。着手時はメール送信の可搬境界（Workers: Email Workers or 外部 API / Node: SMTP）を新設する必要あり |
-| 2 | **S-05 ダッシュボード** | 集計 API 未定義のまま据え置き。ログイン後遷移先は S-06 プロジェクト一覧に固定済み（D-13-1）。`countsSnapshot` が行数概算の下地としてある |
+| 2 | **S-05 ダッシュボード** | 集計 API 未定義のまま据え置き。ログイン後遷移先は S-06 プロジェクト一覧に固定済み（スペック D-13「軽微な解決」第 1 項。コード/プラン内では通称 D-13-1）。`countsSnapshot` が行数概算の下地としてある |
 | 3 | **S-21 レポート/CSV エクスポート** | 集計 API 未定義。画面カタログは docs/screens/admin/ に存在するが実装ゼロ |
 | 4 | **フリーテキスト検索・テーブルソート** | S-08 のフィルタ（status/origin/drift/stale/ownership）は実装済み。検索・ソートは未実装。カーソルページング（D-03: exact total + browser-history 風）との整合設計が必要 |
 | 5 | **Gherkin エクスポートボタン** | 表示タブ + コピー機能は実装済み。ファイルエクスポートは未実装 |
@@ -91,7 +91,7 @@
 | 9 | **Cloudflare Queues / KV キャッシュ / Smart Placement** | 設計上のフックのみ。未実装 |
 | 10 | **ブラウザ E2E** | MVP 対象外と明記（スペック）。data-testid は全画面に付与済みで、Playwright 等を入れるだけの下地はある |
 
-### 4.2 繰延事項（最終レビュー裁定 defer-post-MVP。全 24 項目）
+### 4.2 繰延事項（最終レビュー裁定 defer-post-MVP。全 22 項目）
 
 テストカバレッジ系（機能は他レイヤーで実証済み・穴だけ塞ぐ類）:
 
@@ -189,4 +189,4 @@
 | 起動・デプロイ手順 | `README.md` | CF デプロイ / オンプレ / env 一覧 / 衛星 curl 例 |
 | 本引き継ぎ書 | `docs/HANDOVER.md` | MVP 完了時点のスナップショット |
 
-git 履歴も一次資料（Conventional Commits で全 52 コミット。レビュー fix の経緯はコミットメッセージから追える）。
+git 履歴も一次資料（Conventional Commits。MVP 本体は `71022ea..78bad84` の 52 コミットで、以降にドキュメント整備コミットが続く。レビュー fix の経緯はコミットメッセージから追える）。

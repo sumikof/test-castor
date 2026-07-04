@@ -141,9 +141,13 @@ SELECT ... WHERE token_hash = ? AND revoked_at IS NULL
 ### 構造的保証
 
 1. `Organization` を第一級エンティティとし、`Project.organization_id` を必須 FK にする
-2. `Storage` インターフェースの大多数のメソッドが `orgScope` を必須引数とする — 越境クエリをコンパイル時に防止。以下は意図的な例外（実装済み）:
+2. `Storage` インターフェースの大多数のメソッドが `orgScope` を必須引数とする — 越境クエリをコンパイル時に防止。以下の 16 メソッドは意図的な例外（実装済み。この一覧が正本 — 追加する場合はここと `src/storage/interface.ts` の注記を必ず更新する）:
    - **認証解決系**（org がまだ判明していない時点で呼ばれる。以後の処理は必ず scope 付きメソッドを経由する）: `findUserForLogin`（ログイン時の email 検索）・`getUserById`（セッション→ユーザー解決。authn ミドルウェア専用、API ハンドラでの直接使用は禁止）
+   - **セッションストア系**（authn 基盤。セッション ID / ユーザー ID がキーで、identity 確立前後の境界で動く）: `createSession`・`getSession`・`deleteSession`・`deleteUserSessions`（呼出元は事前に対象ユーザーの org を検証する）
+   - **API トークン認証系**（トークンハッシュ→行解決の authn 経路。org/project の執行は解決後に `resolveProject` が担う）: `findApiTokenByHash`・`touchTokenLastUsed`（best-effort の最終使用時刻更新）
+   - **セットアップ系**（テナント成立前のブートストラップ）: `countOrganizations`・`setupOrganization`
    - **メンテナンス系**（project 横断・システム全体の運用操作であり、特定 org の業務データ操作ではないため。CF の scheduled Cron と、オンプレの `maintenance-cli` の両方から共通実装を呼ぶ）: `purgeObservations`（観測パージ）・`sweepExpiredSyncSessions`（失効セッション sweep）・`deleteExpiredUiSessions`（UI セッションパージ）・`purgeSyncWorkdata`（同期作業データパージ）・`countsSnapshot`（容量監視用の行数スナップショット）
+   - **同期セッション系**（推測不能な sync トークン自体がケイパビリティ・キー）: `syncTouchExpiry`（`interface.ts` に「GC-5 の追加の例外」と注記あり）
 3. API トークンは project スコープ（→ org）。`:pid` の org 不一致は **403**
 4. MVP は単一 org を seed して運用するが、コードパスは常に org を通す
 
