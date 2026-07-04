@@ -61,7 +61,19 @@ registerHooks({
     if (TS_LIKE.test(url)) {
       const path = fileURLToPath(url);
       const source = readFileSync(path, 'utf8');
-      const { outputText } = ts.transpileModule(source, { compilerOptions, fileName: path });
+      const { outputText, diagnostics } = ts.transpileModule(source, {
+        compilerOptions, fileName: path, reportDiagnostics: true,
+      });
+      // HANDOVER D1: transpile 段階の構文エラー(や isolatedModules 非互換)を、後段の不明瞭な
+      // ランタイム SyntaxError にせず、ファイル名・行番号付きの診断メッセージで即座に落とす。
+      if (diagnostics && diagnostics.length > 0) {
+        const message = ts.formatDiagnosticsWithColorAndContext(diagnostics, {
+          getCurrentDirectory: () => projectRoot,
+          getCanonicalFileName: (f) => f,
+          getNewLine: () => '\n',
+        });
+        throw new Error(`node-ts-loader: TypeScript transpile diagnostics for ${path}\n${message}`);
+      }
       return { format: 'module', shortCircuit: true, source: outputText };
     }
     return nextLoad(url, context);
