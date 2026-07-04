@@ -163,6 +163,16 @@ describe('統合: API トークン管理 API', () => {
       expect((await res.json<any>()).error.code).toBe('FORBIDDEN');
     });
 
+    it('viewer: 403 FORBIDDEN(admin 限定。B2)', async () => {
+      const admin = await setupAndLogin(ctx.app);
+      const project = await createProject(ctx.app, admin, 'payment-service');
+      const viewer = await loginAsRole(ctx, admin, 'viewer', 'viewer-get@example.com');
+
+      const res = await ctx.app.request(`/api/v1/projects/${project.body.id}/tokens`, { headers: { Cookie: cookieHeader(viewer.jar) } });
+      expect(res.status).toBe(403);
+      expect((await res.json<any>()).error.code).toBe('FORBIDDEN');
+    });
+
     it(
       '有効な Bearer トークンで叩くと 403 FORBIDDEN(トークン管理は session 専用 = 能力マトリクス「禁止 → 403」)。' +
         'Task 13 で GET /api/v1/projects/:pid/testcases(参照系 GET)が実装されれば、同じ Bearer トークンで' +
@@ -295,6 +305,30 @@ describe('統合: API トークン管理 API', () => {
       );
       expect(res.status).toBe(403);
       expect((await res.json<any>()).error.code).toBe('FORBIDDEN');
+    });
+
+    it('viewer: 403 FORBIDDEN(admin 限定。B2)、トークンは失効しない', async () => {
+      const admin = await setupAndLogin(ctx.app);
+      const project = await createProject(ctx.app, admin, 'payment-service');
+      const issueRes = await ctx.app.request(
+        `/api/v1/projects/${project.body.id}/tokens`,
+        jsonReq('POST', { name: 'keep-alive' }, { Cookie: cookieHeader(admin.jar), 'x-csrf-token': admin.csrf ?? '' }),
+      );
+      const issued = await issueRes.json<any>();
+      const viewer = await loginAsRole(ctx, admin, 'viewer', 'viewer-delete@example.com');
+
+      const res = await ctx.app.request(
+        `/api/v1/projects/${project.body.id}/tokens/${issued.id}`,
+        jsonReq('DELETE', undefined, { Cookie: cookieHeader(viewer.jar), 'x-csrf-token': viewer.csrf ?? '' }),
+      );
+      expect(res.status).toBe(403);
+      expect((await res.json<any>()).error.code).toBe('FORBIDDEN');
+
+      // 識別: 失効していない(admin の一覧で当該 id の revoked_at が null のまま)
+      const listRes = await ctx.app.request(`/api/v1/projects/${project.body.id}/tokens`, { headers: { Cookie: cookieHeader(admin.jar) } });
+      const listBody = await listRes.json<any>();
+      const row = listBody.items.find((t: any) => t.id === issued.id);
+      expect(row.revoked_at).toBeNull();
     });
 
     it('他 org の :pid → 404(存在隠蔽。トークンは他 org の storage 経由で直接作成)', async () => {

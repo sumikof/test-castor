@@ -198,6 +198,30 @@ describe('統合: プロジェクト API', () => {
       expect((await res.json<any>()).error.code).toBe('FORBIDDEN');
     });
 
+    it('viewer: 403 FORBIDDEN(admin 限定。B2)、name は変わらない', async () => {
+      const admin = await setupAndLogin(ctx.app);
+      const created = await createProject(ctx.app, admin, 'patch-viewer-target');
+      await ctx.app.request(
+        '/api/v1/users',
+        jsonReq('POST', { email: 'viewer-patch@example.com', password: 'viewer-pass-1', display_name: 'ViewerPatch', role: 'viewer' }, {
+          Cookie: cookieHeader(admin.jar), 'x-csrf-token': admin.csrf ?? '',
+        }),
+      );
+      const viewerLogin = await loginAs(ctx.app, 'viewer-patch@example.com', 'viewer-pass-1');
+      const res = await ctx.app.request(
+        `/api/v1/projects/${created.body.id}`,
+        jsonReq('PATCH', { name: 'should-not-apply' }, { Cookie: cookieHeader(viewerLogin.jar), 'x-csrf-token': viewerLogin.csrf ?? '' }),
+      );
+      expect(res.status).toBe(403);
+      expect((await res.json<any>()).error.code).toBe('FORBIDDEN');
+
+      // 識別: 名前が変わっていない(admin の一覧から当該 id の name を確認)
+      const listRes = await ctx.app.request('/api/v1/projects', { headers: { Cookie: cookieHeader(admin.jar) } });
+      const listBody = await listRes.json<any>();
+      const row = listBody.items.find((p: any) => p.id === created.body.id);
+      expect(row.name).toBe('patch-viewer-target');
+    });
+
     it('他 org の :pid → 404(存在隠蔽。2つ目の org を setupOrganization で直接作って検証)', async () => {
       const admin = await setupAndLogin(ctx.app);
       const otherOrg = await ctx.storage.setupOrganization({
