@@ -4,3 +4,6 @@ dist/
 public/htmx.min.js
 *.sqlite
 *.sqlite-*
+
+# docker-compose のローカル秘密(コミットしない。雛形は .env.example)
+.env
