@@ -111,6 +111,35 @@ OS の cron から1時間毎に実行する例:
 
 (`npm run maintenance:node` と等価な内容を、cron 経由で環境変数を渡しやすいよう `node` 直接呼び出しの形で例示している。maintenance-cli は署名鍵設定 `SESSION_SIGNING_KEYS` を読まないため cron 側に渡す必要はない — 参照する env は `TMS_DB_PATH` と `OBSERVATION_RETENTION_MS` のみ)
 
+## Docker / docker-compose 起動
+
+オンプレ Node 版(`start:node`)を、`web`(HTTP)+ `maintenance`(定期パージ/vacuum)の2サービスで
+コンテナ起動する。イメージはマルチステージ・非root。SQLite は名前付きボリューム `tms-data` に永続化する。
+
+```bash
+cp .env.example .env
+# .env を編集し SESSION_SIGNING_KEYS を設定する(未設定だと web は起動を中断する):
+#   openssl rand -base64 32   # 出力を {"k1":"<ここ>"} に入れる
+docker compose up --build
+```
+
+- web UI: `http://localhost:8788`(ホスト側ポートは `.env` の `TMS_HOST_PORT` で変更可。コンテナ内は常に 8788)。
+- 初回アクセスは `/setup`(「初期セットアップ」参照)。マイグレーションは起動時に自動適用される。
+- `maintenance` サービスは `MAINTENANCE_INTERVAL_SECONDS`(既定 3600 = 1時間)毎に観測パージ・失効 sweep・
+  `incremental_vacuum` を実行する(`SESSION_SIGNING_KEYS` は読まない — C10/C11)。
+
+| 操作 | コマンド |
+|---|---|
+| 起動(ビルド込み) | `docker compose up --build` |
+| バックグラウンド起動 | `docker compose up --build -d` |
+| ログ確認 | `docker compose logs -f web` / `docker compose logs -f maintenance` |
+| 停止 | `docker compose down` |
+| 停止 + データ削除 | `docker compose down -v`(名前付きボリューム `tms-data` を削除) |
+| 受け入れスモーク(空ボリューム時) | `./scripts/docker-smoke.sh` |
+
+環境変数の意味は「環境変数一覧」を参照。`.env` は `.gitignore` 済み(コミットしない)。bind mount を使う場合は
+ホスト側ディレクトリの所有権が非root `node`(uid 1000)で書ける必要がある(既定の名前付きボリュームでは不要)。
+
 ## 初期セットアップ
 
 Organization が 0 件の状態でどのページにアクセスしても `/setup` に自動リダイレクトされる。ブラウザで `/setup` を開き、組織名・管理者メールアドレス・パスワード・表示名を入力して送信すると、組織と最初の管理者ユーザーが作成され `/login` にリダイレクトされる。以後、`/setup` へのアクセスは `/login` にリダイレクトされ、`POST /api/v1/setup` は `409 SETUP_ALREADY_COMPLETE` を返す(一度きりの操作)。
