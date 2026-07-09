@@ -1,0 +1,17 @@
+.git
+node_modules
+.wrangler
+dist
+*.sqlite
+*.sqlite-*
+.env
+.env.*
+public/htmx.min.js
+tests
+docs
+.claude
+.superpowers
+*.md
+Dockerfile
+compose.yaml
+.dockerignore
