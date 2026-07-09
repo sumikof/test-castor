@@ -13,7 +13,7 @@
 以下はスペック `docs/superpowers/specs/2026-07-08-docker-compose-design.md`(DC-01〜DC-08)由来の全タスク共通制約。各タスクの要求に暗黙で含まれる。
 
 - **ベースは `node:22-bookworm-slim`**(better-sqlite3 は node22 ABI。builder/runtime で同一 base = glibc/arch 一致)。
-- **npm 依存を新規追加しない**(GC-7)。Docker 化はインフラファイルの追加が主で、`src/` 変更は DC-07 の busy_timeout 1行のみ。
+- **npm 依存を新規追加しない**(GC-7)。Docker 化はインフラファイルの追加が主で、`src/` 変更は無し(DC-07 は better-sqlite3 の既定 busy_timeout=5000 で充足するためコード変更しない)。
 - **ローダを維持し、TS をプリコンパイルしない**(DC-01)。実行コマンドは `node --enable-source-maps --import ./src/entry/node-ts-loader.mjs <entry>`。イメージには実行時必須の `typescript`(devDep)を含める(素の `--omit=dev` 禁止)。
 - **`maintenance` は `SESSION_SIGNING_KEYS` を要求しない**(C10/C11。参照 env は `TMS_DB_PATH` と `OBSERVATION_RETENTION_MS` のみ)。compose の `${SESSION_SIGNING_KEYS:?}` 必須化は `web` のみに適用する。
 - **busy_timeout の発行位置**は `foreign_keys = ON` の直後・`auto_vacuum`/WAL 設定より前(auto_vacuum→WAL の順序制約とは独立。HANDOVER §5-8)。
@@ -25,6 +25,8 @@
 ---
 
 ### Task 1: better-sqlite3 に busy_timeout を追加(DC-07)
+
+**⚠️ SUPERSEDED (2026-07-09 実行時裁定): このタスクはコード変更を行わない。** better-sqlite3 v12.11.1 は接続時に `busy_timeout=5000` を自動設定済みで、DC-07 の並行書込み懸念は既定で充足する(spec DC-07 参照)。以下 Step 1-6 は**実行しない**(原案として残置)。DC-07 の検証は「既定が 5000 であることの実測確認」で足りる。
 
 **Files:**
 - Modify: `src/storage/adapters/better-sqlite3.ts:8-9`(`foreign_keys = ON` の直後に1行追加)
@@ -530,7 +532,7 @@ EOF
 ## 最終検証(全タスク後・Docker 不要の範囲)
 
 - [ ] **typecheck + フルスイート**: `export PATH="$HOME/node22/bin:$PATH" && npm run typecheck && npm test`
-  Expected: typecheck 0 エラー、`test:unit` 417 passed(既存 416 + busy_timeout 1)、`test:workers` 399 passed。
+  Expected: typecheck 0 エラー、`test:unit` 416 passed(変更なし)、`test:workers` 399 passed。
 - [ ] **git 状態**: `git status --short` がクリーン(追跡外の `.env` / `tms.sqlite` を残していないこと)。
 
 ## Deferred Acceptance(Docker のある環境で実施)
@@ -546,6 +548,6 @@ EOF
 
 ## Self-Review(記入済み)
 
-- **Spec coverage**: DC-01(Task 3 CMD=ローダ)/ DC-02(Task 3)/ DC-03(Task 4 2サービス)/ DC-04(Task 4 `:?`)/ DC-05(自動マイグレーション=既存挙動、追加サービス無しで充足)/ DC-06(Task 3 `/data` 所有権 + Task 4 volume)/ DC-07(Task 1)/ DC-08(Task 2 + Task 3 .dockerignore + Task 5 README)。全 DC に対応タスクあり。
+- **Spec coverage**: DC-01(Task 3 CMD=ローダ)/ DC-02(Task 3)/ DC-03(Task 4 2サービス)/ DC-04(Task 4 `:?`)/ DC-05(自動マイグレーション=既存挙動、追加サービス無しで充足)/ DC-06(Task 3 `/data` 所有権 + Task 4 volume)/ DC-07(Task 1: 既定で充足・コード変更なし)/ DC-08(Task 2 + Task 3 .dockerignore + Task 5 README)。全 DC に対応タスクあり。
 - **Placeholder scan**: 全コード/ファイル内容は実体を記載。`REPLACE_WITH_...` は .env.example の意図的な指示placeholderで、コミットする雛形の一部。
 - **Type consistency**: `createBetterSqlite3Storage` の戻り `{ sqlite }`、`pragma('busy_timeout',{simple:true})`、compose の `image: tms-web:local` / `build.target: runtime`、`TMS_DB_PATH=/data/tms.sqlite`、コンテナ内 `PORT=8788` はタスク間で一致。
